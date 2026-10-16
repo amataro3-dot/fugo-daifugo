@@ -126,7 +126,7 @@ function applyAction(room, act) {
     const rest = hand.filter((c) => !cards.includes(c));
     const eight = hasNum(cards, 8);
     const jack = hasNum(cards, 11);
-    const newRev = jack ? !rev : rev;
+    const newRev = jack ? true : rev;
 
     upd["hands/" + uid] = rest.length ? rest : null;
     upd["game/last"] = uid;
@@ -146,7 +146,7 @@ function applyAction(room, act) {
       upd["game/field"] = { cards, by: uid, count: cards.length, str: j.str };
       upd["game/rev"] = newRev;
       upd["game/turn"] = nextPlayer(order, g.passed || {}, idx);
-      if (jack) upd["game/notice"] = note(newRev ? "11バック!" : "11バック解除");
+     if (jack && !rev) upd["game/notice"] = note("11バック!");
     }
     return upd;
   }
