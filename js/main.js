@@ -2,7 +2,7 @@ import {
   db, auth, ref, get, set, update, remove, onValue,
   onDisconnect, signInAnonymously
 } from "./firebase.js";
-import { startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks } from "./host.js";
+import { startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks, checkClear } from "./host.js";
 import { renderGame } from "./ui.js";
 const $ = (id) => document.getElementById(id);
 const show = (name) => {
@@ -192,6 +192,7 @@ function render() {
     if (isHost()) {
       processActions(roomId, () => roomData);
       checkFoulAcks(roomId, () => roomData);
+      checkClear(roomId, () => roomData);
       maybeCpu(roomId, () => roomData);
     }
   } else {
