@@ -1,4 +1,4 @@
-import { label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge, suitCheck, lockChoices } from "./rules.js";
+import { label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge, suitCheck, lockChoices, canSpe3, gekCan } from "./rules.js";
 
 let selected = [];
 let lastNoteId = null;
@@ -127,7 +127,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     const lk = document.createElement("div");
     lk.className = "revmark";
     const names = g.lock.suits.map((s) => SUIT_MARK[s]).join("");
-    lk.textContent = (g.lock.mode === "both" ? "両しばり " : "しばり ") + names;
+    lk.textContent = (g.lock.gek ? "激しばり " : g.lock.mode === "both" ? "両しばり " : "しばり ") + names;
     field.appendChild(lk);
   }
     if (g.rev) {
@@ -196,6 +196,12 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   playBtn.textContent = "出す";
   playBtn.disabled = !myTurn;
   playBtn.onclick = async () => {
+        if (canSpe3(g.field || null, g.lock || null, selected)) {
+      const c3 = selected.slice();
+      selected = [];
+      onAction({ type: "play", cards: c3 });
+      return;
+    }
     const j = judge(selected, g.field || null, !!g.rev);
     if (!j.ok) {
       msg.textContent = j.msg;
@@ -218,23 +224,42 @@ export function renderGame(root, room, uid, onLeave, onAction) {
       msg.textContent = sc.msg;
       return;
     }
-    let lock = "none";
+        let lock = "none";
+    let gek = false;
+    const canGek = (mode) =>
+      gekCan(g.field || null, g.lock || null, sc.suits, j.str, cards.length, !!g.rev, mode);
+    const yesNo = [
+      { label: "発動する", value: "yes" },
+      { label: "しない", value: "no" }
+    ];
     if (!g.lock) {
       const ch = lockChoices(g.field || null, sc.suits, cards.length);
       if (ch.length) {
         const opts = [];
         if (cards.length === 1) {
+          if (canGek("one")) opts.push({ label: "激しばり", value: "gek" });
           opts.push({ label: "しばる", value: "one" });
         } else {
           opts.push({ label: "片しば", value: "one" });
           if (ch.includes("both")) opts.push({ label: "両しば", value: "both" });
         }
         opts.push({ label: "しばらない", value: "none" });
-        lock = await askChoice("しばりますか?", opts);
+        const ans = await askChoice("しばりますか?", opts);
+        if (ans === "gek") {
+          lock = "one";
+          gek = true;
+        } else {
+          lock = ans;
+        }
+        if (cards.length === 2 && lock === "both" && canGek("both")) {
+          gek = (await askChoice("激しばりしますか?", yesNo)) === "yes";
+        }
       }
+    } else if (!g.lock.gek && canGek(g.lock.mode)) {
+      gek = (await askChoice("激しばりしますか?", yesNo)) === "yes";
     }
     selected = [];
-    onAction({ type: "play", cards, jsuits: jokers.length ? jsuits : null, lock });
+    onAction({ type: "play", cards, jsuits: jokers.length ? jsuits : null, lock, gek });
   };
   const passBtn = document.createElement("button");
   passBtn.className = "btn";
