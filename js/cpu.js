@@ -1,11 +1,15 @@
-import { findMoves, effStr, lockChoices, canSpe3, gekCan } from "./rules.js";
+import { findMoves, effStr, lockChoices, canSpe3, gekCan, isFoulFinish } from "./rules.js";
 
 export function cpuChoose(hand, field, rev, lock) {
   if (hand.includes("S3") && canSpe3(field, lock, ["S3"])) {
     return { type: "play", cards: ["S3"], jsuits: null, lock: "none", gek: false };
   }
-  const moves = findMoves(hand, field, rev, lock);
-  if (moves.length === 0) return { type: "pass", cards: [] };
+  const all = findMoves(hand, field, rev, lock);
+  const moves = all.filter((x) => !isFoulFinish(x.cards, hand, rev));
+  if (moves.length === 0) {
+    if (field || all.length === 0) return { type: "pass", cards: [] };
+    moves.push(all[0]);
+  }
   let m = moves.find((x) => x.cards.length === hand.length);
   if (!m) {
     moves.sort((a, b) => effStr(a.str, rev) - effStr(b.str, rev));
