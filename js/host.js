@@ -99,6 +99,7 @@ function note(text) {
 function applyAction(room, act) {
   const g = room.game;
   if (!g || g.phase !== "play" || act.uid !== g.turn) return null;
+  if (g.foul) return null;
   const uid = act.uid;
   curOut = g.out || {};
   const order = g.order;
@@ -183,6 +184,8 @@ function applyAction(room, act) {
         return upd;
       }
       curOut = outNow;
+      upd["game/foul"] = { id: Date.now(), name: me ? me.name : "", cards, acks: {} };
+      upd["game/field"] = g.field || null;
       const next = nextPlayer(order, g.passed || {}, idx);
       if (field && (next === null || next === g.last)) {
         upd["game/field"] = null;
@@ -252,6 +255,23 @@ function applyAction(room, act) {
 }
 
 let busy = false;
+export function sendAck(roomId, uid) {
+  return set(ref(db, "rooms/" + roomId + "/game/foul/acks/" + uid), true);
+}
+
+export async function checkFoulAcks(roomId, getRoom) {
+  const room = getRoom();
+  const f = room && room.game && room.game.foul;
+  if (!f) return;
+  const acks = f.acks || {};
+  const need = Object.entries(room.players || {})
+    .filter(([id, p]) => !p.cpu && !p.spectator && p.online !== false && (room.game.order || []).includes(id))
+    .map(([id]) => id);
+  if (need.every((id) => acks[id])) {
+    await update(ref(db, "rooms/" + roomId + "/game"), { foul: null });
+  }
+}
+
 export async function processActions(roomId, getRoom) {
   if (busy) return;
   busy = true;
@@ -275,7 +295,7 @@ export function maybeCpu(roomId, getRoom) {
   if (cpuTimer) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || g.phase !== "play" || room.actions) return;
+  if (!g || g.phase !== "play" || room.actions || g.foul) return;
   const p = room.players && room.players[g.turn];
   if (!p || !p.cpu) return;
   const turn = g.turn;
