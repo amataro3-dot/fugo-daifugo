@@ -110,6 +110,27 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     setTimeout(() => pop.remove(), 2200);
   }
 
+    document.querySelectorAll(".foulov").forEach((e) => e.remove());
+  if (g.foul && !(g.foul.acks && g.foul.acks[uid]) && !spectator) {
+    const ov = document.createElement("div");
+    ov.className = "overlay foulov";
+    const t = document.createElement("div");
+    t.textContent = "😱 " + g.foul.name + " さん反則負け!";
+    ov.appendChild(t);
+    const row = document.createElement("div");
+    row.className = "hand";
+    (g.foul.cards || []).forEach((c) => row.appendChild(cardEl(c, "small")));
+    ov.appendChild(row);
+    const tap = document.createElement("div");
+    tap.className = "small";
+    tap.textContent = "(タップで進む)";
+    ov.appendChild(tap);
+    ov.onclick = () => {
+      ov.remove();
+      onAction({ type: "ack" });
+    };
+    document.body.appendChild(ov);
+  }
   root.innerHTML = "";
 
   const bar = document.createElement("div");
@@ -171,7 +192,12 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     rv.textContent = "11バック中";
     field.appendChild(rv);
   }
-  if (g.field) {
+    if (g.foul && !g.field) {
+    const row = document.createElement("div");
+    row.className = "hand";
+    (g.foul.cards || []).forEach((c) => row.appendChild(cardEl(c, "small")));
+    field.appendChild(row);
+  } else if (g.field) {
     const row = document.createElement("div");
     row.className = "hand";
     g.field.cards.forEach((c) => row.appendChild(cardEl(c, "small")));
