@@ -6,6 +6,7 @@ import { startGame, sendAction, processActions, maybeCpu } from "./host.js";
 import { renderGame } from "./ui.js";
 const $ = (id) => document.getElementById(id);
 const show = (name) => {
+  document.querySelectorAll(".popup,.overlay").forEach((e) => e.remove());
   ["entry", "lobby", "game"].forEach((s) =>
     $("screen-" + s).classList.toggle("hidden", s !== name)
   );
