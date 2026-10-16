@@ -1,4 +1,6 @@
-import { label, SUIT_MARK, isJoker, suitOf, numOf, sortHand } from "./rules.js";
+import { label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge } from "./rules.js";
+
+let selected = [];
 
 export function cardEl(c, cls) {
   const d = document.createElement("div");
@@ -44,10 +46,16 @@ function seatEl(id, p, count, game, openHand, hand) {
   d.appendChild(nm);
   d.appendChild(coin);
   d.appendChild(backs);
+  if (game.passed && game.passed[id]) {
+    const ps = document.createElement("div");
+    ps.className = "passmark";
+    ps.textContent = "パス";
+    d.appendChild(ps);
+  }
   return d;
 }
 
-export function renderGame(root, room, uid, onLeave) {
+export function renderGame(root, room, uid, onLeave, onAction) {
   const g = room.game || {};
   const players = room.players || {};
   const hands = room.hands || {};
@@ -55,9 +63,12 @@ export function renderGame(root, room, uid, onLeave) {
   const me = players[uid] || {};
   const spectator = !!me.spectator || !order.includes(uid);
 
+  // 手札が変わっていたら選択をリセット
+  const myHand = hands[uid] || [];
+  selected = selected.filter((c) => myHand.includes(c));
+
   root.innerHTML = "";
 
-  // 上のバー
   const bar = document.createElement("div");
   bar.className = "g-bar";
   const deckN = room.deck ? room.deck.length : 0;
@@ -71,13 +82,11 @@ export function renderGame(root, room, uid, onLeave) {
   bar.appendChild(leave);
   root.appendChild(bar);
 
-  // 席の並べ方: 自分(観戦者は先頭)から時計回り
   let start = order.indexOf(uid);
   if (start < 0) start = 0;
   const rotated = order.slice(start).concat(order.slice(0, start));
   const others = spectator ? rotated : rotated.slice(1);
 
-  // 上・左・右に振り分ける
   const n = others.length;
   let left = [], top = [], right = [];
   if (n <= 3) {
@@ -102,27 +111,82 @@ export function renderGame(root, room, uid, onLeave) {
   };
   grid.appendChild(mk("g-top", top));
   grid.appendChild(mk("g-left", left));
+
+  // 場
   const field = document.createElement("div");
   field.className = "g-field";
-  field.textContent = "場(これから作ります)";
+  if (g.phase === "result") {
+    const w = players[g.winner];
+    field.textContent = "🎉 " + (w ? w.name : "") + " の勝ち!";
+  } else if (g.field) {
+    const row = document.createElement("div");
+    row.className = "hand";
+    g.field.cards.forEach((c) => row.appendChild(cardEl(c, "small")));
+    field.appendChild(row);
+  } else {
+    field.textContent = "場にカードなし";
+  }
   grid.appendChild(field);
   grid.appendChild(mk("g-right", right));
   root.appendChild(grid);
 
-  // 自分の手札
   if (spectator) {
     const t = document.createElement("div");
     t.className = "me-box";
     t.textContent = "観戦中";
     root.appendChild(t);
-  } else {
-    const info = document.createElement("div");
-    info.className = "me-box";
-    info.textContent = me.name + "  🪙" + me.coins;
-    root.appendChild(info);
-    const hd = document.createElement("div");
-    hd.className = "hand";
-    sortHand(hands[uid] || []).forEach((c) => hd.appendChild(cardEl(c)));
-    root.appendChild(hd);
+    return;
   }
-                                            }
+
+  const myTurn = g.phase === "play" && g.turn === uid;
+  const info = document.createElement("div");
+  info.className = "me-box";
+  info.textContent = me.name + "  🪙" + me.coins + (myTurn ? "  ← あなたの番" : "");
+  root.appendChild(info);
+
+  const hd = document.createElement("div");
+  hd.className = "hand";
+  sortHand(myHand).forEach((c) => {
+    const el = cardEl(c);
+    if (selected.includes(c)) el.classList.add("sel");
+    el.onclick = () => {
+      if (selected.includes(c)) selected = selected.filter((x) => x !== c);
+      else if (selected.length < 3) selected.push(c);
+      renderGame(root, room, uid, onLeave, onAction);
+    };
+    hd.appendChild(el);
+  });
+  root.appendChild(hd);
+
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  root.appendChild(msg);
+
+  const btns = document.createElement("div");
+  btns.className = "g-btns";
+  const playBtn = document.createElement("button");
+  playBtn.className = "btn main";
+  playBtn.textContent = "出す";
+  playBtn.disabled = !myTurn;
+  playBtn.onclick = () => {
+    const j = judge(selected, g.field || null);
+    if (!j.ok) {
+      msg.textContent = j.msg;
+      return;
+    }
+    const cards = selected.slice();
+    selected = [];
+    onAction({ type: "play", cards });
+  };
+  const passBtn = document.createElement("button");
+  passBtn.className = "btn";
+  passBtn.textContent = "パス";
+  passBtn.disabled = !myTurn || !g.field;
+  passBtn.onclick = () => {
+    selected = [];
+    onAction({ type: "pass" });
+  };
+  btns.appendChild(playBtn);
+  btns.appendChild(passBtn);
+  root.appendChild(btns);
+    }
