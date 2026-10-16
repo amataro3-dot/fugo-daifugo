@@ -77,7 +77,6 @@ export function judge(cards, field, rev) {
   return { ok: true, str };
 }
 
-// 出すカードのマーク一覧(ジョーカーは指定されたマーク)
 export function playSuits(cards, jsuits) {
   const out = [];
   cards.forEach((c) => {
@@ -91,7 +90,6 @@ export function playSuits(cards, jsuits) {
   return out;
 }
 
-// しばりに合っているか
 export function lockOk(suits, lock) {
   if (!lock) return true;
   if (lock.mode === "both") {
@@ -100,7 +98,6 @@ export function lockOk(suits, lock) {
   return suits.some((s) => lock.suits.includes(s));
 }
 
-// マークの確認(ジョーカー単体は、しばり中でも出せる)
 export function suitCheck(cards, jsuits, lock) {
   const n = cards.length;
   if (n === 1 && isJoker(cards[0])) return { ok: true, suits: [] };
@@ -113,7 +110,6 @@ export function suitCheck(cards, jsuits, lock) {
   return { ok: true, suits };
 }
 
-// 今回「しばる」を選べる種類("one" = 1枚しばり/片しば, "both" = 両しば)
 export function lockChoices(field, suits, n) {
   if (!field || !field.suits || field.suits.length !== n || n < 1 || n > 2) return [];
   const common = suits.filter((s) => field.suits.includes(s)).length;
@@ -124,6 +120,46 @@ export function lockChoices(field, suits, n) {
     if (common === 2) out.push("both");
   }
   return out;
+}
+
+// ---- ここから新規: スペ3返し・激しばり ----
+
+// 場がジョーカー単体か
+export function isJokerSingle(field) {
+  return !!field && field.cards.length === 1 && isJoker(field.cards[0]);
+}
+
+// スペ3返しができるか(♠以外のしばり中は不可)
+export function canSpe3(field, lock, cards) {
+  if (!isJokerSingle(field)) return false;
+  if (cards.length !== 1 || cards[0] !== "S3") return false;
+  if (lock && !lock.suits.includes("S")) return false;
+  return true;
+}
+
+// 「次の数字」の強さ(11バック中は逆向き)。なければ null
+export function nextStr(s, rev) {
+  if (s === 16) return null;
+  const eff = effStr(s, rev) + 1;
+  if (eff > 15) return null;
+  return rev ? 18 - eff : eff;
+}
+
+// 場と同じマークで、次の数字か
+export function gekFollow(field, suits, str, rev) {
+  if (!field || !field.suits) return false;
+  if (suits.length !== field.suits.length) return false;
+  if (!suits.every((s) => field.suits.includes(s))) return false;
+  return nextStr(field.str, rev) === str;
+}
+
+// 激しばりを発動できる出し方か(mode は今回選んだしばりの種類)
+export function gekCan(field, lock, suits, str, n, rev, mode) {
+  if (lock && lock.gek) return false;
+  if (n < 1 || n > 2) return false;
+  if (!gekFollow(field, suits, str, rev)) return false;
+  if (n === 1) return true;
+  return mode === "both";
 }
 
 function assigns(jokers) {
@@ -152,11 +188,12 @@ export function findMoves(hand, field, rev, lock) {
     const jokers = cards.length >= 2 ? cards.filter(isJoker) : [];
     for (const js of assigns(jokers)) {
       const sc = suitCheck(cards, js, lock || null);
-      if (sc.ok) {
-        moves.push({ cards, str: j.str, jsuits: js, suits: sc.suits });
-        break;
-      }
+      if (!sc.ok) continue;
+      const jokerSingle = cards.length === 1 && isJoker(cards[0]);
+      if (lock && lock.gek && !jokerSingle && !gekFollow(field, sc.suits, j.str, rev)) continue;
+      moves.push({ cards, str: j.str, jsuits: js, suits: sc.suits });
+      break;
     }
   }
   return moves;
-                          }
+}
