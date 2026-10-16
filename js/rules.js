@@ -197,3 +197,13 @@ export function findMoves(hand, field, rev, lock) {
   }
   return moves;
 }
+// ---- 禁止上がり ----
+export function isForbidden(c, rev) {
+  if (isJoker(c)) return true;
+  const n = numOf(c);
+  return n === 2 || n === 8 || (rev && n === 3);
+}
+
+export function isFoulFinish(cards, hand, rev) {
+  return cards.length === hand.length && cards.some((c) => isForbidden(c, rev));
+}
