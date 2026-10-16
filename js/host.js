@@ -174,7 +174,7 @@ function applyAction(room, act) {
       }
     }
     if (act.gek && newLock && !newLock.gek) {
-      if (gekCan(field, lockNow, sc.suits, j.str, cards.length, rev, act.lock)) {
+        if (gekCan(field, lockNow, sc.suits, j.str, cards.length, rev, lockNow ? lockNow.mode : act.lock)) {
         newLock = { mode: newLock.mode, suits: newLock.suits, gek: true };
         msgs.length = 0;
         msgs.push("激しばり!");
