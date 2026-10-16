@@ -310,6 +310,30 @@ export function maybeCpu(roomId, getRoom) {
     sendAction(roomId, turn, a);
   }, 1500);
           }
+let cpuTimer = null;
+export function maybeCpu(roomId, getRoom) {
+  if (cpuTimer) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || g.phase !== "play" || room.actions || g.foul || g.clear) return;
+  const p = room.players && room.players[g.turn];
+  if (!p || !p.cpu) return;
+  const turn = g.turn;
+  cpuTimer = setTimeout(() => {
+    cpuTimer = null;
+    const r = getRoom();
+    if (!r || !r.game) return;
+    const gg = r.game;
+    if (gg.phase !== "play" || gg.turn !== turn || gg.foul || gg.clear || r.actions) {
+      maybeCpu(roomId, getRoom);
+      return;
+    }
+    const hand = (r.hands && r.hands[turn]) || [];
+    const a = cpuChoose(hand, gg.field || null, !!gg.rev, gg.lock || null);
+    sendAction(roomId, turn, a);
+  }, 1500);
+}
+
 let clearTimer = null;
 export function checkClear(roomId, getRoom) {
   if (clearTimer) return;
