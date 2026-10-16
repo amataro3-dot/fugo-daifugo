@@ -101,9 +101,9 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     top = others;
   } else {
     const side = Math.min(3, Math.floor(n / 3));
-    left = others.slice(0, side);
-    right = others.slice(n - side).reverse();
-    top = others.slice(side, n - side).reverse();
+        left = others.slice(0, side).reverse();
+    right = others.slice(n - side);
+    top = others.slice(side, n - side);
   }
 
   const grid = document.createElement("div");
