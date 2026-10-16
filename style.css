@@ -162,3 +162,17 @@ input, select {
   z-index: 100;
   pointer-events: none;
 }
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  color: #f2c230;
+  font-size: 28px;
+  font-weight: bold;
+  text-align: center;
+  white-space: pre-line;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
