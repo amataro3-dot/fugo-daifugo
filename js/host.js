@@ -98,8 +98,8 @@ function note(text) {
 
 function applyAction(room, act) {
   const g = room.game;
-  if (!g || g.phase !== "play" || act.uid !== g.turn) return null;
-  if (g.foul) return null;
+  if (!g || g.phase !== "play" || room.actions || g.foul || g.clear) return;
+  if (g.foul || g.clear) return null;
   const uid = act.uid;
   curOut = g.out || {};
   const order = g.order;
@@ -149,9 +149,10 @@ function applyAction(room, act) {
         upd["game/phase"] = "result";
         upd["game/winner"] = uid;
         upd["game/turn"] = null;
-      } else {
-        upd["game/field"] = null;
-        upd["game/turn"] = uid;
+     } else {
+        upd["game/field"] = { cards, by: uid, count: 1, str: 3, suits: ["S"] };
+        upd["game/clear"] = { id: Date.now(), turn: uid };
+        upd["game/turn"] = null;
         upd["game/notice"] = note("スペ3返し!");
       }
       return upd;
@@ -235,11 +236,9 @@ function applyAction(room, act) {
       upd["game/winner"] = uid;
       upd["game/turn"] = null;
     } else if (eight) {
-      upd["game/field"] = null;
-      upd["game/passed"] = null;
-      upd["game/rev"] = false;
-      upd["game/lock"] = null;
-      upd["game/turn"] = uid;
+      upd["game/field"] = fieldObj;
+      upd["game/clear"] = { id: Date.now(), turn: uid };
+      upd["game/turn"] = null;
       upd["game/notice"] = note("8切り!");
     } else {
       upd["game/field"] = fieldObj;
@@ -311,3 +310,24 @@ export function maybeCpu(roomId, getRoom) {
     sendAction(roomId, turn, a);
   }, 1500);
           }
+let clearTimer = null;
+export function checkClear(roomId, getRoom) {
+  if (clearTimer) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || !g.clear || g.phase !== "play") return;
+  const c = g.clear;
+  clearTimer = setTimeout(async () => {
+    clearTimer = null;
+    const r = getRoom();
+    if (!r || !r.game || !r.game.clear || r.game.clear.id !== c.id) return;
+    await update(ref(db, "rooms/" + roomId + "/game"), {
+      field: null,
+      passed: null,
+      rev: false,
+      lock: null,
+      clear: null,
+      turn: c.turn
+    });
+  }, 1500);
+}
