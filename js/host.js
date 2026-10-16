@@ -1,5 +1,8 @@
 import { db, ref, update, set } from "./firebase.js";
-import { makeLot, shuffle, judge, hasNum, suitCheck, lockChoices } from "./rules.js";
+import {
+  makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
+  canSpe3, gekCan, gekFollow, isJoker
+} from "./rules.js";
 import { cpuChoose } from "./cpu.js";
 
 function draw(state, n) {
@@ -73,7 +76,8 @@ export function sendAction(roomId, uid, act) {
     type: act.type,
     cards: act.cards || [],
     jsuits: act.jsuits || null,
-    lock: act.lock || "none"
+    lock: act.lock || "none",
+    gek: !!act.gek
   });
 }
 
@@ -125,18 +129,55 @@ function applyAction(room, act) {
     const cards = act.cards || [];
     if (new Set(cards).size !== cards.length) return null;
     if (!cards.every((c) => hand.includes(c))) return null;
-    const j = judge(cards, g.field || null, rev);
+    const field = g.field || null;
+    const lockNow = g.lock || null;
+
+    // スペ3返し
+    if (canSpe3(field, lockNow, cards)) {
+      const rest0 = hand.filter((c) => !cards.includes(c));
+      upd["hands/" + uid] = rest0.length ? rest0 : null;
+      upd["game/last"] = uid;
+      upd["game/lock"] = null;
+      upd["game/rev"] = false;
+      upd["game/passed"] = null;
+      if (rest0.length === 0) {
+        upd["game/field"] = { cards, by: uid, count: 1, str: 3, suits: ["S"] };
+        upd["game/phase"] = "result";
+        upd["game/winner"] = uid;
+        upd["game/turn"] = null;
+      } else {
+        upd["game/field"] = null;
+        upd["game/turn"] = uid;
+        upd["game/notice"] = note("スペ3返し!");
+      }
+      return upd;
+    }
+
+    const j = judge(cards, field, rev);
     if (!j.ok) return null;
-    const sc = suitCheck(cards, act.jsuits || null, g.lock || null);
+    const sc = suitCheck(cards, act.jsuits || null, lockNow);
     if (!sc.ok) return null;
 
-    let newLock = g.lock || null;
+    // 激しばり中は、同じマークの次の数字だけ(ジョーカー単体は例外)
+    const jokerSingle = cards.length === 1 && isJoker(cards[0]);
+    if (lockNow && lockNow.gek && !jokerSingle) {
+      if (!gekFollow(field, sc.suits, j.str, rev)) return null;
+    }
+
+    let newLock = lockNow;
     const msgs = [];
-    if (!g.lock && act.lock && act.lock !== "none") {
-      const ch = lockChoices(g.field || null, sc.suits, cards.length);
+    if (!lockNow && act.lock && act.lock !== "none") {
+      const ch = lockChoices(field, sc.suits, cards.length);
       if (ch.includes(act.lock)) {
         newLock = { mode: act.lock, suits: sc.suits };
         msgs.push(act.lock === "both" ? "両しば!" : "しばり!");
+      }
+    }
+    if (act.gek && newLock && !newLock.gek) {
+      if (gekCan(field, lockNow, sc.suits, j.str, cards.length, rev, act.lock)) {
+        newLock = { mode: newLock.mode, suits: newLock.suits, gek: true };
+        msgs.length = 0;
+        msgs.push("激しばり!");
       }
     }
 
@@ -214,4 +255,4 @@ export function maybeCpu(roomId, getRoom) {
     const a = cpuChoose(hand, r.game.field || null, !!r.game.rev, r.game.lock || null);
     sendAction(roomId, turn, a);
   }, 1500);
-    }
+          }
