@@ -2,7 +2,8 @@ import {
   db, auth, ref, get, set, update, remove, onValue,
   onDisconnect, signInAnonymously
 } from "./firebase.js";
-
+import { startGame } from "./host.js";
+import { renderGame } from "./ui.js";
 const $ = (id) => document.getElementById(id);
 const show = (name) => {
   ["entry", "lobby", "game"].forEach((s) =>
