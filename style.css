@@ -1,8 +1,52 @@
+* { box-sizing: border-box; }
 body {
   margin: 0;
   font-family: sans-serif;
   background: #0b5d3b;
   color: #fff;
-  text-align: center;
 }
-#app { padding: 24px 16px; }
+#app { max-width: 480px; margin: 0 auto; padding: 20px 16px; }
+.hidden { display: none !important; }
+h1 { text-align: center; font-size: 32px; margin: 16px 0 24px; }
+h2 { text-align: center; margin: 0 0 8px; }
+h3 { margin: 20px 0 8px; font-size: 16px; }
+label { display: block; margin: 10px 0 4px; font-size: 14px; }
+input, select {
+  width: 100%;
+  padding: 12px;
+  font-size: 16px;
+  border: none;
+  border-radius: 8px;
+  background: #fff;
+  color: #222;
+}
+.btn {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 14px;
+  font-size: 17px;
+  font-weight: bold;
+  border: 2px solid #fff;
+  border-radius: 10px;
+  background: transparent;
+  color: #fff;
+}
+.btn.main { background: #f2c230; border-color: #f2c230; color: #222; }
+.btn.sub { border-color: #8bbba5; color: #cfe5da; font-weight: normal; font-size: 14px; }
+.btn:disabled { opacity: 0.4; }
+.divider { text-align: center; margin: 20px 0 10px; color: #cfe5da; }
+.msg { color: #ffd0d0; min-height: 1.4em; text-align: center; }
+.small { font-size: 12px; color: #cfe5da; font-weight: normal; }
+.roomid { text-align: center; font-size: 18px; }
+.roomid b { font-size: 32px; letter-spacing: 4px; }
+#player-list { list-style: none; padding: 0; margin: 0; }
+#player-list li {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+}
+.settings { background: rgba(0, 0, 0, 0.2); padding: 8px 12px 14px; border-radius: 10px; }
