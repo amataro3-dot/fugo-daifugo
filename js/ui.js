@@ -168,7 +168,10 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   const myTurn = g.phase === "play" && g.turn === uid;
   const info = document.createElement("div");
   info.className = "me-box";
-  info.textContent = me.name + "  🪙" + me.coins + (myTurn ? "  ← あなたの番" : "");
+    info.textContent =
+    me.name + "  🪙" + me.coins +
+    (g.passed && g.passed[uid] ? "  【パス】" : "") +
+    (myTurn ? "  ← あなたの番" : "");
   root.appendChild(info);
 
   const hd = document.createElement("div");
