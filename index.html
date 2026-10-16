@@ -56,6 +56,14 @@
   </section>
 
 </div>
+<script>
+window.addEventListener("error", function (e) {
+  var d = document.createElement("div");
+  d.style.cssText = "position:fixed;bottom:0;left:0;right:0;background:#900;color:#fff;font-size:12px;padding:8px;z-index:999;white-space:pre-wrap";
+  d.textContent = "エラー: " + e.message + "\n" + (e.filename || "") + ":" + (e.lineno || "");
+  document.body.appendChild(d);
+});
+</script>
 <script type="module" src="js/main.js"></script>
 </body>
 </html>
