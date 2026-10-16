@@ -1,4 +1,4 @@
-import { label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge } from "./rules.js";
+import { label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge, suitCheck, lockChoices } from "./rules.js";
 
 let selected = [];
 let lastNoteId = null;
@@ -122,7 +122,14 @@ export function renderGame(root, room, uid, onLeave, onAction) {
 
   // 場
   const field = document.createElement("div");
-  field.className = "g-field";
+    field.className = "g-field";
+  if (g.lock) {
+    const lk = document.createElement("div");
+    lk.className = "revmark";
+    const names = g.lock.suits.map((s) => SUIT_MARK[s]).join("");
+    lk.textContent = (g.lock.mode === "both" ? "両しばり " : "しばり ") + names;
+    field.appendChild(lk);
+  }
     if (g.rev) {
     const rv = document.createElement("div");
     rv.className = "revmark";
@@ -188,15 +195,46 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   playBtn.className = "btn main";
   playBtn.textContent = "出す";
   playBtn.disabled = !myTurn;
-  playBtn.onclick = () => {
-    const j = judge(selected, g.field || null);
+  playBtn.onclick = async () => {
+    const j = judge(selected, g.field || null, !!g.rev);
     if (!j.ok) {
       msg.textContent = j.msg;
       return;
     }
     const cards = selected.slice();
+    const jsuits = {};
+    const jokers = cards.length >= 2 ? cards.filter(isJoker) : [];
+    for (const jk of jokers) {
+      const used = Object.values(jsuits).concat(
+        cards.filter((c) => !isJoker(c)).map(suitOf)
+      );
+      const opts = ["S", "H", "D", "C"]
+        .filter((s) => !used.includes(s))
+        .map((s) => ({ label: SUIT_MARK[s], value: s }));
+      jsuits[jk] = await askChoice("ジョーカーのマークは?", opts);
+    }
+    const sc = suitCheck(cards, jsuits, g.lock || null);
+    if (!sc.ok) {
+      msg.textContent = sc.msg;
+      return;
+    }
+    let lock = "none";
+    if (!g.lock) {
+      const ch = lockChoices(g.field || null, sc.suits, cards.length);
+      if (ch.length) {
+        const opts = [];
+        if (cards.length === 1) {
+          opts.push({ label: "しばる", value: "one" });
+        } else {
+          opts.push({ label: "片しば", value: "one" });
+          if (ch.includes("both")) opts.push({ label: "両しば", value: "both" });
+        }
+        opts.push({ label: "しばらない", value: "none" });
+        lock = await askChoice("しばりますか?", opts);
+      }
+    }
     selected = [];
-    onAction({ type: "play", cards });
+    onAction({ type: "play", cards, jsuits: jokers.length ? jsuits : null, lock });
   };
   const passBtn = document.createElement("button");
   passBtn.className = "btn";
@@ -210,3 +248,27 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   btns.appendChild(passBtn);
   root.appendChild(btns);
     }
+function askChoice(title, opts) {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "choice";
+    const box = document.createElement("div");
+    box.className = "choice-box";
+    const t = document.createElement("div");
+    t.className = "choice-title";
+    t.textContent = title;
+    box.appendChild(t);
+    opts.forEach((o) => {
+      const b = document.createElement("button");
+      b.className = "btn";
+      b.textContent = o.label;
+      b.onclick = () => {
+        ov.remove();
+        resolve(o.value);
+      };
+      box.appendChild(b);
+    });
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+  });
+}
