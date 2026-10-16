@@ -183,7 +183,16 @@ function render() {
   $("lobby-msg").textContent =
     host && !allReady ? "全員が準備完了になるとスタートできます" : "";
 
-  if (roomData.meta.started) show("game");
+    if (roomData.meta.started) {
+    show("game");
+    renderGame($("game-root"), roomData, uid, onLeaveGame);
+  } else {
+    show("lobby");
+    }
+}
+  function onLeaveGame() {
+  if (!confirm("本当に退出しますか?")) return;
+  $("btn-leave").onclick();
 }
 ["set-coins", "set-rounds", "set-bidmax", "set-players"].forEach((id) => {
   $(id).onchange = () => {
@@ -210,7 +219,7 @@ $("btn-ready").onclick = () => {
 
 $("btn-start").onclick = () => {
   if (!isHost()) return;
-  update(ref(db, "rooms/" + roomId + "/meta"), { started: true });
+    startGame(roomId, roomData);
 };
 
 $("btn-leave").onclick = async () => {
