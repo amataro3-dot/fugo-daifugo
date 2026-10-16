@@ -98,7 +98,7 @@ function note(text) {
 
 function applyAction(room, act) {
   const g = room.game;
-  if (!g || g.phase !== "play" || room.actions || g.foul || g.clear) return;
+  if (!g || g.phase !== "play" || act.uid !== g.turn) return null;
   if (g.foul || g.clear) return null;
   const uid = act.uid;
   curOut = g.out || {};
