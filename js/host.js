@@ -1,7 +1,7 @@
 import { db, ref, update, set } from "./firebase.js";
 import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
-  canSpe3, gekCan, gekFollow, isJoker
+  canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
 } from "./rules.js";
 import { cpuChoose } from "./cpu.js";
 
@@ -81,11 +81,13 @@ export function sendAction(roomId, uid, act) {
   });
 }
 
+let curOut = {};
+
 function nextPlayer(order, passed, idx) {
   const n = order.length;
   for (let i = 1; i <= n; i++) {
     const id = order[(idx + i) % n];
-    if (!passed[id]) return id;
+    if (!passed[id] && !curOut[id]) return id;
   }
   return null;
 }
@@ -98,6 +100,7 @@ function applyAction(room, act) {
   const g = room.game;
   if (!g || g.phase !== "play" || act.uid !== g.turn) return null;
   const uid = act.uid;
+  curOut = g.out || {};
   const order = g.order;
   const idx = order.indexOf(uid);
   const rev = !!g.rev;
@@ -162,6 +165,38 @@ function applyAction(room, act) {
     const jokerSingle = cards.length === 1 && isJoker(cards[0]);
     if (lockNow && lockNow.gek && !jokerSingle) {
       if (!gekFollow(field, sc.suits, j.str, rev)) return null;
+    }
+
+        // 禁止上がり(反則負け)
+    if (isFoulFinish(cards, hand, rev)) {
+      const me = room.players[uid];
+      const nm = (me ? me.name : "") + " さん反則負け!";
+      const outNow = Object.assign({}, g.out || {}, { [uid]: true });
+      upd["hands/" + uid] = null;
+      upd["game/out/" + uid] = true;
+      const alive = order.filter((id) => !outNow[id]);
+      if (alive.length === 0) {
+        upd["game/phase"] = "result";
+        upd["game/winner"] = null;
+        upd["game/turn"] = null;
+        upd["game/notice"] = note(nm + "\nノーゲーム");
+        return upd;
+      }
+      curOut = outNow;
+      const next = nextPlayer(order, g.passed || {}, idx);
+      if (field && (next === null || next === g.last)) {
+        upd["game/field"] = null;
+        upd["game/passed"] = null;
+        upd["game/rev"] = false;
+        upd["game/lock"] = null;
+        upd["game/turn"] = g.last;
+        upd["game/notice"] = note(nm + "\n場が流れます");
+      } else {
+        upd["game/turn"] = next;
+        if (!field) upd["game/last"] = next;
+        upd["game/notice"] = note(nm);
+      }
+      return upd;
     }
 
     let newLock = lockNow;
