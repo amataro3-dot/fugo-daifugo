@@ -1,5 +1,5 @@
 import { db, ref, update, set } from "./firebase.js";
-import { makeLot, shuffle, judge } from "./rules.js";
+import { makeLot, shuffle, judge, hasNum } from "./rules.js";
 import { cpuChoose } from "./cpu.js";
 
 function draw(state, n) {
@@ -58,16 +58,14 @@ export async function startGame(roomId, roomData) {
 
   updates["deck"] = state.deck;
   updates["lot"] = state.lot;
-  // 今はテスト用に、席の先頭の人が親(あとでオークションで決める)
   updates["game"] = {
-    round: 1, phase: "play", pot: 0, order: seatOrder, turn: seatOrder[0]
+    round: 1, phase: "play", pot: 0, order: seatOrder, turn: seatOrder[0], rev: false
   };
   updates["meta/started"] = true;
 
   await update(ref(db, "rooms/" + roomId), updates);
 }
 
-// 操作を「受付箱」に書く(全員が使う)
 export function sendAction(roomId, uid, act) {
   const key = Date.now() + "_" + Math.random().toString(36).slice(2, 6);
   return set(ref(db, "rooms/" + roomId + "/actions/" + key), {
@@ -84,23 +82,32 @@ function nextPlayer(order, passed, idx) {
   return null;
 }
 
-// 1つの操作をルールで確認して、更新内容を作る
+function note(text) {
+  return { text, id: Date.now() };
+}
+
 function applyAction(room, act) {
   const g = room.game;
   if (!g || g.phase !== "play" || act.uid !== g.turn) return null;
   const uid = act.uid;
   const order = g.order;
   const idx = order.indexOf(uid);
+  const rev = !!g.rev;
   const upd = {};
 
   if (act.type === "pass") {
     if (!g.field) return null;
     const passed = Object.assign({}, g.passed || {}, { [uid]: true });
     const next = nextPlayer(order, passed, idx);
-    if (next === g.last) {
+    if (next === g.last || next === null) {
+      const lp = room.players[g.last];
       upd["game/field"] = null;
       upd["game/passed"] = null;
+      upd["game/rev"] = false;
       upd["game/turn"] = g.last;
+      upd["game/notice"] = note(
+        "全員パスで場が流れます\n" + (lp ? lp.name : "") + " さんから"
+      );
     } else {
       upd["game/passed"] = passed;
       upd["game/turn"] = next;
@@ -113,25 +120,39 @@ function applyAction(room, act) {
     const cards = act.cards || [];
     if (new Set(cards).size !== cards.length) return null;
     if (!cards.every((c) => hand.includes(c))) return null;
-    const j = judge(cards, g.field || null);
+    const j = judge(cards, g.field || null, rev);
     if (!j.ok) return null;
+
     const rest = hand.filter((c) => !cards.includes(c));
+    const eight = hasNum(cards, 8);
+    const jack = hasNum(cards, 11);
+    const newRev = jack ? !rev : rev;
+
     upd["hands/" + uid] = rest.length ? rest : null;
-    upd["game/field"] = { cards, by: uid, count: cards.length, str: j.str };
     upd["game/last"] = uid;
+
     if (rest.length === 0) {
+      upd["game/field"] = { cards, by: uid, count: cards.length, str: j.str };
       upd["game/phase"] = "result";
       upd["game/winner"] = uid;
       upd["game/turn"] = null;
+    } else if (eight) {
+      upd["game/field"] = null;
+      upd["game/passed"] = null;
+      upd["game/rev"] = false;
+      upd["game/turn"] = uid;
+      upd["game/notice"] = note("8切り!");
     } else {
+      upd["game/field"] = { cards, by: uid, count: cards.length, str: j.str };
+      upd["game/rev"] = newRev;
       upd["game/turn"] = nextPlayer(order, g.passed || {}, idx);
+      if (jack) upd["game/notice"] = note(newRev ? "11バック!" : "11バック解除");
     }
     return upd;
   }
   return null;
 }
 
-// ホストだけが呼ぶ: 受付箱の操作を順番に処理する
 let busy = false;
 export async function processActions(roomId, getRoom) {
   if (busy) return;
@@ -151,7 +172,6 @@ export async function processActions(roomId, getRoom) {
   }
 }
 
-// ホストだけが呼ぶ: コンピューターの手番なら、1.5秒待って出す
 let cpuTimer = null;
 export function maybeCpu(roomId, getRoom) {
   if (cpuTimer) return;
@@ -169,6 +189,6 @@ export function maybeCpu(roomId, getRoom) {
       return;
     }
     const hand = (r.hands && r.hands[turn]) || [];
-    sendAction(roomId, turn, cpuChoose(hand, r.game.field || null));
+    sendAction(roomId, turn, cpuChoose(hand, r.game.field || null, !!r.game.rev));
   }, 1500);
-}
+  }
