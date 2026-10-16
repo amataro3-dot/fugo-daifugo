@@ -1,8 +1,12 @@
-import { label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge, suitCheck, lockChoices, canSpe3, gekCan } from "./rules.js";
+import {
+  label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge, suitCheck,
+  lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden
+} from "./rules.js";
 
 let selected = [];
 let lastNoteId = null;
 let winShownId = null;
+
 export function cardEl(c, cls) {
   const d = document.createElement("div");
   d.className = "card " + (cls || "");
@@ -47,6 +51,12 @@ function seatEl(id, p, count, game, openHand, hand) {
   d.appendChild(nm);
   d.appendChild(coin);
   d.appendChild(backs);
+  if (game.out && game.out[id]) {
+    const fm = document.createElement("div");
+    fm.className = "passmark";
+    fm.textContent = "反則負け";
+    d.appendChild(fm);
+  }
   if (game.passed && game.passed[id]) {
     const ps = document.createElement("div");
     ps.className = "passmark";
@@ -56,6 +66,30 @@ function seatEl(id, p, count, game, openHand, hand) {
   return d;
 }
 
+function askChoice(title, opts) {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "choice";
+    const box = document.createElement("div");
+    box.className = "choice-box";
+    const t = document.createElement("div");
+    t.className = "choice-title";
+    t.textContent = title;
+    box.appendChild(t);
+    opts.forEach((o) => {
+      const b = document.createElement("button");
+      b.className = "btn";
+      b.textContent = o.label;
+      b.onclick = () => {
+        ov.remove();
+        resolve(o.value);
+      };
+      box.appendChild(b);
+    });
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+  });
+}
 export function renderGame(root, room, uid, onLeave, onAction) {
   const g = room.game || {};
   const players = room.players || {};
@@ -64,19 +98,20 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   const me = players[uid] || {};
   const spectator = !!me.spectator || !order.includes(uid);
 
-  // 手札が変わっていたら選択をリセット
   const myHand = hands[uid] || [];
   selected = selected.filter((c) => myHand.includes(c));
 
-  root.innerHTML = "";
   if (g.notice && g.notice.id !== lastNoteId) {
     lastNoteId = g.notice.id;
     const pop = document.createElement("div");
     pop.className = "popup";
     pop.textContent = g.notice.text;
     document.body.appendChild(pop);
-  　setTimeout(() => pop.remove(), 2200);
+    setTimeout(() => pop.remove(), 2200);
   }
+
+  root.innerHTML = "";
+
   const bar = document.createElement("div");
   bar.className = "g-bar";
   const deckN = room.deck ? room.deck.length : 0;
@@ -101,7 +136,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     top = others;
   } else {
     const side = Math.min(3, Math.floor(n / 3));
-        left = others.slice(0, side).reverse();
+    left = others.slice(0, side).reverse();
     right = others.slice(n - side);
     top = others.slice(side, n - side);
   }
@@ -120,23 +155,23 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   grid.appendChild(mk("g-top", top));
   grid.appendChild(mk("g-left", left));
 
-  // 場
   const field = document.createElement("div");
-    field.className = "g-field";
+  field.className = "g-field";
   if (g.lock) {
     const lk = document.createElement("div");
     lk.className = "revmark";
     const names = g.lock.suits.map((s) => SUIT_MARK[s]).join("");
-    lk.textContent = (g.lock.gek ? "激しばり " : g.lock.mode === "both" ? "両しばり " : "しばり ") + names;
+    lk.textContent =
+      (g.lock.gek ? "激しばり " : g.lock.mode === "both" ? "両しばり " : "しばり ") + names;
     field.appendChild(lk);
   }
-    if (g.rev) {
+  if (g.rev) {
     const rv = document.createElement("div");
     rv.className = "revmark";
     rv.textContent = "11バック中";
     field.appendChild(rv);
-    }
-    if (g.field) {
+  }
+  if (g.field) {
     const row = document.createElement("div");
     row.className = "hand";
     g.field.cards.forEach((c) => row.appendChild(cardEl(c, "small")));
@@ -149,7 +184,9 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     const w = players[g.winner];
     const ov = document.createElement("div");
     ov.className = "overlay";
-    ov.textContent = "🎉 " + (w ? w.name : "") + " さん上がり!!\n(タップで閉じる)";
+    ov.textContent = w
+      ? "🎉 " + w.name + " さん上がり!!\n(タップで閉じる)"
+      : "ノーゲーム\n(タップで閉じる)";
     ov.onclick = () => ov.remove();
     document.body.appendChild(ov);
   }
@@ -168,11 +205,18 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   const myTurn = g.phase === "play" && g.turn === uid;
   const info = document.createElement("div");
   info.className = "me-box";
-    info.textContent =
+  info.textContent =
     me.name + "  🪙" + me.coins +
+    (g.out && g.out[uid] ? "  【反則負け】" : "") +
     (g.passed && g.passed[uid] ? "  【パス】" : "") +
     (myTurn ? "  ← あなたの番" : "");
   root.appendChild(info);
+  if (myHand.length && myHand.every((c) => isForbidden(c, !!g.rev))) {
+    const w = document.createElement("div");
+    w.className = "msg";
+    w.textContent = "上がり禁止カードしかありません";
+    root.appendChild(w);
+  }
 
   const hd = document.createElement("div");
   hd.className = "hand";
@@ -199,7 +243,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   playBtn.textContent = "出す";
   playBtn.disabled = !myTurn;
   playBtn.onclick = async () => {
-        if (canSpe3(g.field || null, g.lock || null, selected)) {
+    if (canSpe3(g.field || null, g.lock || null, selected)) {
       const c3 = selected.slice();
       selected = [];
       onAction({ type: "play", cards: c3 });
@@ -227,7 +271,14 @@ export function renderGame(root, room, uid, onLeave, onAction) {
       msg.textContent = sc.msg;
       return;
     }
-        let lock = "none";
+    if (isFoulFinish(cards, myHand, !!g.rev)) {
+      const okk = await askChoice("反則負けになりますがよろしいですか?", [
+        { label: "出す(反則負け)", value: "yes" },
+        { label: "やめる", value: "no" }
+      ]);
+      if (okk !== "yes") return;
+    }
+    let lock = "none";
     let gek = false;
     const canGek = (mode) =>
       gekCan(g.field || null, g.lock || null, sc.suits, j.str, cards.length, !!g.rev, mode);
@@ -275,28 +326,4 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   btns.appendChild(playBtn);
   btns.appendChild(passBtn);
   root.appendChild(btns);
-    }
-function askChoice(title, opts) {
-  return new Promise((resolve) => {
-    const ov = document.createElement("div");
-    ov.className = "choice";
-    const box = document.createElement("div");
-    box.className = "choice-box";
-    const t = document.createElement("div");
-    t.className = "choice-title";
-    t.textContent = title;
-    box.appendChild(t);
-    opts.forEach((o) => {
-      const b = document.createElement("button");
-      b.className = "btn";
-      b.textContent = o.label;
-      b.onclick = () => {
-        ov.remove();
-        resolve(o.value);
-      };
-      box.appendChild(b);
-    });
-    ov.appendChild(box);
-    document.body.appendChild(ov);
-  });
-}
+        }
