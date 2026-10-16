@@ -1,7 +1,8 @@
 import { label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge } from "./rules.js";
 
 let selected = [];
-
+let lastNoteId = null;
+let noteTimer = null;
 export function cardEl(c, cls) {
   const d = document.createElement("div");
   d.className = "card " + (cls || "");
@@ -68,7 +69,15 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   selected = selected.filter((c) => myHand.includes(c));
 
   root.innerHTML = "";
-
+  if (g.notice && g.notice.id !== lastNoteId) {
+    lastNoteId = g.notice.id;
+    const pop = document.createElement("div");
+    pop.className = "popup";
+    pop.textContent = g.notice.text;
+    document.body.appendChild(pop);
+    if (noteTimer) clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => pop.remove(), 2200);
+  }
   const bar = document.createElement("div");
   bar.className = "g-bar";
   const deckN = room.deck ? room.deck.length : 0;
@@ -115,6 +124,12 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   // 場
   const field = document.createElement("div");
   field.className = "g-field";
+    if (g.rev) {
+    const rv = document.createElement("div");
+    rv.className = "revmark";
+    rv.textContent = "11バック中";
+    field.appendChild(rv);
+    }
   if (g.phase === "result") {
     const w = players[g.winner];
     field.textContent = "🎉 " + (w ? w.name : "") + " の勝ち!";
