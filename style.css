@@ -50,3 +50,90 @@ input, select {
   border-radius: 8px;
 }
 .settings { background: rgba(0, 0, 0, 0.2); padding: 8px 12px 14px; border-radius: 10px; }
+/* ===== ゲーム画面 ===== */
+.g-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+.g-bar b { font-size: 15px; color: #f2c230; }
+.g-bar button {
+  font-size: 11px;
+  padding: 4px 8px;
+  border: 1px solid #8bbba5;
+  border-radius: 6px;
+  background: transparent;
+  color: #cfe5da;
+}
+.g-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr 1fr;
+  grid-template-areas: "top top top" "left field right";
+  gap: 6px;
+  margin: 8px 0;
+}
+.g-top { grid-area: top; display: flex; justify-content: center; gap: 6px; flex-wrap: wrap; }
+.g-left { grid-area: left; display: flex; flex-direction: column; gap: 6px; }
+.g-right { grid-area: right; display: flex; flex-direction: column; gap: 6px; }
+.g-field {
+  grid-area: field;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 12px;
+  padding: 6px;
+  font-size: 12px;
+  color: #cfe5da;
+}
+.seat {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 4px 6px;
+  font-size: 12px;
+  text-align: center;
+  min-width: 70px;
+}
+.seat.turn { outline: 2px solid #f2c230; }
+.seat .nm { font-weight: bold; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 90px; }
+.seat .coin { color: #f2c230; }
+.backs { display: flex; justify-content: center; flex-wrap: wrap; gap: 1px; margin-top: 3px; }
+.me-box { text-align: center; font-size: 14px; margin-top: 4px; }
+.hand { display: flex; justify-content: center; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+
+/* ===== トランプ風カード ===== */
+.card {
+  position: relative;
+  width: 46px;
+  height: 66px;
+  background: #fff;
+  color: #222;
+  border-radius: 6px;
+  border: 1px solid #999;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 18px;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  user-select: none;
+}
+.card .s { font-size: 22px; margin-top: 2px; }
+.card.red { color: #d22; }
+.card.joker { font-size: 11px; color: #7a2bb8; }
+.card.sel { transform: translateY(-10px); outline: 2px solid #f2c230; }
+.card.back {
+  background: repeating-linear-gradient(45deg, #2a4fa8, #2a4fa8 4px, #1d3a82 4px, #1d3a82 8px);
+  border: 2px solid #fff;
+}
+.card.small { width: 30px; height: 44px; font-size: 12px; }
+.card.small .s { font-size: 14px; }
+.card.mini { width: 16px; height: 23px; border-radius: 3px; border-width: 1px; }
