@@ -1,5 +1,5 @@
 import { db, ref, update, set } from "./firebase.js";
-import { makeLot, shuffle, judge, hasNum } from "./rules.js";
+import { makeLot, shuffle, judge, hasNum, suitCheck, lockChoices } from "./rules.js";
 import { cpuChoose } from "./cpu.js";
 
 function draw(state, n) {
@@ -69,7 +69,11 @@ export async function startGame(roomId, roomData) {
 export function sendAction(roomId, uid, act) {
   const key = Date.now() + "_" + Math.random().toString(36).slice(2, 6);
   return set(ref(db, "rooms/" + roomId + "/actions/" + key), {
-    uid, type: act.type, cards: act.cards || []
+    uid,
+    type: act.type,
+    cards: act.cards || [],
+    jsuits: act.jsuits || null,
+    lock: act.lock || "none"
   });
 }
 
@@ -104,6 +108,7 @@ function applyAction(room, act) {
       upd["game/field"] = null;
       upd["game/passed"] = null;
       upd["game/rev"] = false;
+      upd["game/lock"] = null;
       upd["game/turn"] = g.last;
       upd["game/notice"] = note(
         "全員パスで場が流れます\n" + (lp ? lp.name : "") + " さんから"
@@ -122,17 +127,31 @@ function applyAction(room, act) {
     if (!cards.every((c) => hand.includes(c))) return null;
     const j = judge(cards, g.field || null, rev);
     if (!j.ok) return null;
+    const sc = suitCheck(cards, act.jsuits || null, g.lock || null);
+    if (!sc.ok) return null;
+
+    let newLock = g.lock || null;
+    const msgs = [];
+    if (!g.lock && act.lock && act.lock !== "none") {
+      const ch = lockChoices(g.field || null, sc.suits, cards.length);
+      if (ch.includes(act.lock)) {
+        newLock = { mode: act.lock, suits: sc.suits };
+        msgs.push(act.lock === "both" ? "両しば!" : "しばり!");
+      }
+    }
 
     const rest = hand.filter((c) => !cards.includes(c));
     const eight = hasNum(cards, 8);
     const jack = hasNum(cards, 11);
     const newRev = jack ? true : rev;
+    const fieldObj = { cards, by: uid, count: cards.length, str: j.str, suits: sc.suits };
 
     upd["hands/" + uid] = rest.length ? rest : null;
     upd["game/last"] = uid;
 
     if (rest.length === 0) {
-      upd["game/field"] = { cards, by: uid, count: cards.length, str: j.str };
+      upd["game/field"] = fieldObj;
+      upd["game/lock"] = null;
       upd["game/phase"] = "result";
       upd["game/winner"] = uid;
       upd["game/turn"] = null;
@@ -140,13 +159,16 @@ function applyAction(room, act) {
       upd["game/field"] = null;
       upd["game/passed"] = null;
       upd["game/rev"] = false;
+      upd["game/lock"] = null;
       upd["game/turn"] = uid;
       upd["game/notice"] = note("8切り!");
     } else {
-      upd["game/field"] = { cards, by: uid, count: cards.length, str: j.str };
+      upd["game/field"] = fieldObj;
       upd["game/rev"] = newRev;
+      upd["game/lock"] = newLock;
       upd["game/turn"] = nextPlayer(order, g.passed || {}, idx);
-     if (jack && !rev) upd["game/notice"] = note("11バック!");
+      if (jack && !rev) msgs.push("11バック!");
+      if (msgs.length) upd["game/notice"] = note(msgs.join("\n"));
     }
     return upd;
   }
@@ -189,6 +211,7 @@ export function maybeCpu(roomId, getRoom) {
       return;
     }
     const hand = (r.hands && r.hands[turn]) || [];
-    sendAction(roomId, turn, cpuChoose(hand, r.game.field || null, !!r.game.rev));
+    const a = cpuChoose(hand, r.game.field || null, !!r.game.rev, r.game.lock || null);
+    sendAction(roomId, turn, a);
   }, 1500);
-  }
+    }
