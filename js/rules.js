@@ -50,3 +50,35 @@ export function strength(c) {
 export function sortHand(cards) {
   return cards.slice().sort((a, b) => strength(a) - strength(b) || a.localeCompare(b));
 }
+// 出し方の判定(1枚・ペア・3枚。ジョーカーは数字の代わりになる)
+export function judge(cards, field) {
+  const n = cards.length;
+  if (n < 1 || n > 3) return { ok: false, msg: "1〜3枚で出してください" };
+  const normal = cards.filter((c) => !isJoker(c));
+  if (normal.length > 0) {
+    const num = numOf(normal[0]);
+    if (normal.some((c) => numOf(c) !== num)) {
+      return { ok: false, msg: "同じ数字のカードを選んでください" };
+    }
+  }
+  const str = normal.length ? strength(normal[0]) : 16;
+  if (field) {
+    if (field.count !== n) return { ok: false, msg: "場と同じ枚数で出してください" };
+    if (str <= field.str) return { ok: false, msg: "場より強いカードを出してください" };
+  }
+  return { ok: true, str };
+}
+
+// 手札から出せる組み合わせを全部さがす
+export function findMoves(hand, field) {
+  const moves = [];
+  const n = hand.length;
+  for (let mask = 1; mask < 1 << n; mask++) {
+    const cards = [];
+    for (let i = 0; i < n; i++) if (mask & (1 << i)) cards.push(hand[i]);
+    if (cards.length > 3) continue;
+    const j = judge(cards, field);
+    if (j.ok) moves.push({ cards, str: j.str });
+  }
+  return moves;
+}
