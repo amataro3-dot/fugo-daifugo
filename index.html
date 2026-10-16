@@ -8,8 +8,53 @@
 </head>
 <body>
 <div id="app">
-  <h1>富豪大富豪</h1>
-  <p id="status">接続テスト中...</p>
+
+  <section id="screen-entry" class="screen">
+    <h1>富豪大富豪</h1>
+    <label>名前</label>
+    <input id="name-input" maxlength="8" placeholder="名前を入力">
+    <button id="btn-create" class="btn main">ルーム作成</button>
+    <div class="divider">または</div>
+    <input id="room-input" inputmode="numeric" maxlength="4" placeholder="ルームID(数字4桁)">
+    <button id="btn-join" class="btn">ルーム入室</button>
+    <p id="entry-msg" class="msg"></p>
+    <p id="status" class="small"></p>
+  </section>
+
+  <section id="screen-lobby" class="screen hidden">
+    <h2>ロビー</h2>
+    <p class="roomid">ルームID: <b id="lobby-roomid">----</b></p>
+
+    <h3>参加者</h3>
+    <ul id="player-list"></ul>
+
+    <h3>ルール設定 <span id="host-note" class="small"></span></h3>
+    <div class="settings">
+      <label>初期コイン</label>
+      <select id="set-coins"></select>
+      <label>ラウンド数</label>
+      <select id="set-rounds"></select>
+      <label>入札上限X</label>
+      <select id="set-bidmax"></select>
+      <label>対戦人数</label>
+      <select id="set-players"></select>
+      <label>借金ルール</label>
+      <select id="set-debt">
+        <option value="on">あり</option>
+        <option value="off">なし</option>
+      </select>
+    </div>
+
+    <button id="btn-ready" class="btn">準備完了</button>
+    <button id="btn-start" class="btn main hidden">ゲームスタート</button>
+    <button id="btn-leave" class="btn sub">退出する</button>
+    <p id="lobby-msg" class="msg"></p>
+  </section>
+
+  <section id="screen-game" class="screen hidden">
+    <p>ゲーム画面(これから作ります)</p>
+  </section>
+
 </div>
 <script type="module" src="js/main.js"></script>
 </body>
