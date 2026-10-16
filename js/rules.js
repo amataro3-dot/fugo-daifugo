@@ -43,7 +43,6 @@ export function strength(c) {
   return n;
 }
 
-// 11バック中は強弱が逆転(ジョーカーは常に最強)
 export function effStr(s, rev) {
   if (s === 16) return 16;
   return rev ? 18 - s : s;
@@ -53,7 +52,6 @@ export function sortHand(cards) {
   return cards.slice().sort((a, b) => strength(a) - strength(b) || a.localeCompare(b));
 }
 
-// 出したカードに、指定の数字が含まれるか(ジョーカーは一緒に出した数字の扱い)
 export function hasNum(cards, n) {
   const normal = cards.filter((c) => !isJoker(c));
   return normal.length > 0 && numOf(normal[0]) === n;
@@ -79,7 +77,70 @@ export function judge(cards, field, rev) {
   return { ok: true, str };
 }
 
-export function findMoves(hand, field, rev) {
+// 出すカードのマーク一覧(ジョーカーは指定されたマーク)
+export function playSuits(cards, jsuits) {
+  const out = [];
+  cards.forEach((c) => {
+    if (isJoker(c)) {
+      const s = jsuits && jsuits[c];
+      if (s) out.push(s);
+    } else {
+      out.push(suitOf(c));
+    }
+  });
+  return out;
+}
+
+// しばりに合っているか
+export function lockOk(suits, lock) {
+  if (!lock) return true;
+  if (lock.mode === "both") {
+    return suits.length === lock.suits.length && lock.suits.every((s) => suits.includes(s));
+  }
+  return suits.some((s) => lock.suits.includes(s));
+}
+
+// マークの確認(ジョーカー単体は、しばり中でも出せる)
+export function suitCheck(cards, jsuits, lock) {
+  const n = cards.length;
+  if (n === 1 && isJoker(cards[0])) return { ok: true, suits: [] };
+  const suits = playSuits(cards, jsuits);
+  if (suits.length !== n) return { ok: false, msg: "ジョーカーのマークを選んでください" };
+  if (new Set(suits).size !== n) return { ok: false, msg: "同じマークは重ねられません" };
+  if (lock && !lockOk(suits, lock)) {
+    return { ok: false, msg: lock.mode === "both" ? "両しばりです" : "しばりです。同じマークを含めてください" };
+  }
+  return { ok: true, suits };
+}
+
+// 今回「しばる」を選べる種類("one" = 1枚しばり/片しば, "both" = 両しば)
+export function lockChoices(field, suits, n) {
+  if (!field || !field.suits || field.suits.length !== n || n < 1 || n > 2) return [];
+  const common = suits.filter((s) => field.suits.includes(s)).length;
+  const out = [];
+  if (n === 1 && common === 1) out.push("one");
+  if (n === 2) {
+    if (common >= 1) out.push("one");
+    if (common === 2) out.push("both");
+  }
+  return out;
+}
+
+function assigns(jokers) {
+  let res = [{}];
+  jokers.forEach((j) => {
+    const next = [];
+    res.forEach((a) => {
+      SUITS.forEach((s) => {
+        if (!Object.values(a).includes(s)) next.push(Object.assign({}, a, { [j]: s }));
+      });
+    });
+    res = next;
+  });
+  return res;
+}
+
+export function findMoves(hand, field, rev, lock) {
   const moves = [];
   const n = hand.length;
   for (let mask = 1; mask < 1 << n; mask++) {
@@ -87,7 +148,15 @@ export function findMoves(hand, field, rev) {
     for (let i = 0; i < n; i++) if (mask & (1 << i)) cards.push(hand[i]);
     if (cards.length > 3) continue;
     const j = judge(cards, field, rev);
-    if (j.ok) moves.push({ cards, str: j.str });
+    if (!j.ok) continue;
+    const jokers = cards.length >= 2 ? cards.filter(isJoker) : [];
+    for (const js of assigns(jokers)) {
+      const sc = suitCheck(cards, js, lock || null);
+      if (sc.ok) {
+        moves.push({ cards, str: j.str, jsuits: js, suits: sc.suits });
+        break;
+      }
+    }
   }
   return moves;
-}
+                          }
