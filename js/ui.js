@@ -2,7 +2,7 @@ import { label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge } from "./rul
 
 let selected = [];
 let lastNoteId = null;
-let noteTimer = null;
+let winShownId = null;
 export function cardEl(c, cls) {
   const d = document.createElement("div");
   d.className = "card " + (cls || "");
@@ -75,8 +75,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     pop.className = "popup";
     pop.textContent = g.notice.text;
     document.body.appendChild(pop);
-    if (noteTimer) clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => pop.remove(), 2200);
+  　setTimeout(() => pop.remove(), 2200);
   }
   const bar = document.createElement("div");
   bar.className = "g-bar";
@@ -130,16 +129,22 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     rv.textContent = "11バック中";
     field.appendChild(rv);
     }
-  if (g.phase === "result") {
-    const w = players[g.winner];
-    field.textContent = "🎉 " + (w ? w.name : "") + " の勝ち!";
-  } else if (g.field) {
+    if (g.field) {
     const row = document.createElement("div");
     row.className = "hand";
     g.field.cards.forEach((c) => row.appendChild(cardEl(c, "small")));
     field.appendChild(row);
   } else {
     field.textContent = "場にカードなし";
+  }
+  if (g.phase === "result" && winShownId !== g.winner + "_" + g.round) {
+    winShownId = g.winner + "_" + g.round;
+    const w = players[g.winner];
+    const ov = document.createElement("div");
+    ov.className = "overlay";
+    ov.textContent = "🎉 " + (w ? w.name : "") + " さん上がり!!\n(タップで閉じる)";
+    ov.onclick = () => ov.remove();
+    document.body.appendChild(ov);
   }
   grid.appendChild(field);
   grid.appendChild(mk("g-right", right));
