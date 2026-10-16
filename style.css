@@ -199,3 +199,9 @@ input, select {
   font-weight: bold;
   margin-bottom: 6px;
 }
+.overlay.foulov {
+  flex-direction: column;
+  gap: 14px;
+  color: #ff9a9a;
+}
+.overlay.foulov .small { color: #cfe5da; font-size: 14px; }
