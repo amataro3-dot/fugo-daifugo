@@ -141,15 +141,15 @@ function applyAction(room, act) {
       const rest0 = hand.filter((c) => !cards.includes(c));
       upd["hands/" + uid] = rest0.length ? rest0 : null;
       upd["game/last"] = uid;
-      upd["game/lock"] = null;
-      upd["game/rev"] = false;
       upd["game/passed"] = null;
       if (rest0.length === 0) {
         upd["game/field"] = { cards, by: uid, count: 1, str: 3, suits: ["S"] };
+        upd["game/lock"] = null;
+        upd["game/rev"] = false;
         upd["game/phase"] = "result";
         upd["game/winner"] = uid;
         upd["game/turn"] = null;
-     } else {
+      } else {
         upd["game/field"] = { cards, by: uid, count: 1, str: 3, suits: ["S"] };
         upd["game/clear"] = { id: Date.now(), turn: uid };
         upd["game/turn"] = null;
@@ -163,13 +163,12 @@ function applyAction(room, act) {
     const sc = suitCheck(cards, act.jsuits || null, lockNow);
     if (!sc.ok) return null;
 
-    // 激しばり中は、同じマークの次の数字だけ(ジョーカー単体は例外)
     const jokerSingle = cards.length === 1 && isJoker(cards[0]);
     if (lockNow && lockNow.gek && !jokerSingle) {
       if (!gekFollow(field, sc.suits, j.str, rev)) return null;
     }
 
-        // 禁止上がり(反則負け)
+    // 禁止上がり(反則負け)
     if (isFoulFinish(cards, hand, rev)) {
       const me = room.players[uid];
       const nm = (me ? me.name : "") + " さん反則負け!";
@@ -202,8 +201,7 @@ function applyAction(room, act) {
       }
       return upd;
     }
-
-    let newLock = lockNow;
+        let newLock = lockNow;
     const msgs = [];
     if (!lockNow && act.lock && act.lock !== "none") {
       const ch = lockChoices(field, sc.suits, cards.length);
@@ -213,7 +211,7 @@ function applyAction(room, act) {
       }
     }
     if (act.gek && newLock && !newLock.gek) {
-        if (gekCan(field, lockNow, sc.suits, j.str, cards.length, rev, lockNow ? lockNow.mode : act.lock)) {
+      if (gekCan(field, lockNow, sc.suits, j.str, cards.length, rev, lockNow ? lockNow.mode : act.lock)) {
         newLock = { mode: newLock.mode, suits: newLock.suits, gek: true };
         msgs.length = 0;
         msgs.push("激しばり!");
@@ -254,6 +252,7 @@ function applyAction(room, act) {
 }
 
 let busy = false;
+
 export function sendAck(roomId, uid) {
   return set(ref(db, "rooms/" + roomId + "/game/foul/acks/" + uid), true);
 }
@@ -294,19 +293,43 @@ export function maybeCpu(roomId, getRoom) {
   if (cpuTimer) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || g.phase !== "play" || room.actions || g.foul) return;
+  if (!g || g.phase !== "play" || room.actions || g.foul || g.clear) return;
   const p = room.players && room.players[g.turn];
   if (!p || !p.cpu) return;
   const turn = g.turn;
   cpuTimer = setTimeout(() => {
     cpuTimer = null;
     const r = getRoom();
-    if (!r || !r.game || r.game.phase !== "play" || r.game.turn !== turn) {
+    if (!r || !r.game) return;
+    const gg = r.game;
+    if (gg.phase !== "play" || gg.turn !== turn || gg.foul || gg.clear || r.actions) {
       maybeCpu(roomId, getRoom);
       return;
     }
     const hand = (r.hands && r.hands[turn]) || [];
-    const a = cpuChoose(hand, r.game.field || null, !!r.game.rev, r.game.lock || null);
+    const a = cpuChoose(hand, gg.field || null, !!gg.rev, gg.lock || null);
     sendAction(roomId, turn, a);
   }, 1500);
-          }
+}
+
+let clearTimer = null;
+export function checkClear(roomId, getRoom) {
+  if (clearTimer) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || !g.clear || g.phase !== "play") return;
+  const c = g.clear;
+  clearTimer = setTimeout(async () => {
+    clearTimer = null;
+    const r = getRoom();
+    if (!r || !r.game || !r.game.clear || r.game.clear.id !== c.id) return;
+    await update(ref(db, "rooms/" + roomId + "/game"), {
+      field: null,
+      passed: null,
+      rev: false,
+      lock: null,
+      clear: null,
+      turn: c.turn
+    });
+  }, 1500);
+}
