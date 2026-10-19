@@ -18,6 +18,10 @@ function draw(state, n) {
   return out;
 }
 
+function note(text) {
+  return { text, id: Date.now() };
+}
+
 export async function startGame(roomId, roomData) {
   const settings = roomData.settings;
   const players = roomData.players || {};
@@ -90,10 +94,6 @@ function nextPlayer(order, passed, idx) {
     if (!passed[id] && !curOut[id]) return id;
   }
   return null;
-}
-
-function note(text) {
-  return { text, id: Date.now() };
 }
 
 function applyAction(room, act) {
@@ -201,7 +201,8 @@ function applyAction(room, act) {
       }
       return upd;
     }
-        let newLock = lockNow;
+
+    let newLock = lockNow;
     const msgs = [];
     if (!lockNow && act.lock && act.lock !== "none") {
       const ch = lockChoices(field, sc.suits, cards.length);
@@ -332,4 +333,171 @@ export function checkClear(roomId, getRoom) {
       turn: c.turn
     });
   }, 1500);
+}
+
+// ===== ここから: 精算・リザルト・次ラウンド・最終順位 =====
+
+// ラウンド終了の精算(勝者がポットを受け取る)。ホストだけが呼ぶ
+let settling = false;
+export async function settle(roomId, getRoom) {
+  if (settling) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || g.phase !== "result" || g.result) return;
+  settling = true;
+  try {
+    const players = room.players || {};
+    const pot = g.pot || 0;
+    const winner = g.winner || null;
+    const upd = {};
+    const coinsAfter = {};
+    g.order.forEach((id) => {
+      coinsAfter[id] = (players[id] && players[id].coins) || 0;
+    });
+    if (winner) {
+      coinsAfter[winner] += pot;
+      upd["players/" + winner + "/coins"] = coinsAfter[winner];
+    }
+    const outIds = g.order.filter((id) => coinsAfter[id] <= 0);
+    const remaining = g.order.filter((id) => coinsAfter[id] > 0);
+    const last = remaining.length <= 1 || g.round >= room.settings.rounds;
+    const result = {
+      gain: winner ? pot : 0,
+      carry: winner ? 0 : pot,
+      last,
+      acks: {}
+    };
+    if (winner) result.winner = winner;
+    if (outIds.length) result.outIds = outIds;
+    upd["game/pot"] = winner ? 0 : pot;
+    upd["game/result"] = result;
+    await update(ref(db, "rooms/" + roomId), upd);
+  } finally {
+    settling = false;
+  }
+}
+
+export function sendResultAck(roomId, uid) {
+  return set(ref(db, "rooms/" + roomId + "/game/result/acks/" + uid), true);
+}
+
+// 全員がOKを押したら次へ(コンピューター・観戦者・切断中の人は待たない)
+let advancing = false;
+export async function checkResultAcks(roomId, getRoom) {
+  if (advancing) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || g.phase !== "result" || !g.result) return;
+  const acks = g.result.acks || {};
+  const need = Object.entries(room.players || {})
+    .filter(([id, p]) => !p.cpu && !p.spectator && p.online !== false && (g.order || []).includes(id))
+    .map(([id]) => id);
+  if (!need.every((id) => acks[id])) return;
+  advancing = true;
+  try {
+    await nextRound(roomId, room);
+  } finally {
+    advancing = false;
+  }
+}
+
+function rankList(list, keyFn, startRank, desc) {
+  const sorted = list.slice().sort((a, b) => (desc ? keyFn(b) - keyFn(a) : keyFn(a) - keyFn(b)));
+  let rank = startRank;
+  sorted.forEach((x, i) => {
+    if (i > 0 && keyFn(x) === keyFn(sorted[i - 1])) x.rank = sorted[i - 1].rank;
+    else x.rank = startRank + i;
+  });
+  return sorted;
+}
+
+async function nextRound(roomId, room) {
+  const g = room.game;
+  const players = room.players || {};
+  const rr = g.round;
+  const upd = {};
+
+  const exit = {};
+  Object.entries(players).forEach(([id, p]) => {
+    if (p.exitRound) exit[id] = p.exitRound;
+  });
+  g.order.forEach((id) => {
+    const c = (players[id] && players[id].coins) || 0;
+    if (c <= 0) {
+      exit[id] = rr;
+      upd["players/" + id + "/exitRound"] = rr;
+      upd["players/" + id + "/spectator"] = true;
+    }
+  });
+  const remaining = g.order.filter((id) => !exit[id]);
+  const last = remaining.length <= 1 || rr >= room.settings.rounds;
+
+  if (last) {
+    const all = Object.entries(players)
+      .filter(([, p]) => p.coins !== undefined)
+      .map(([id, p]) => ({
+        id,
+        name: p.name,
+        coins: p.coins || 0,
+        debtTotal: p.debtTotal || 0,
+        score: (p.coins || 0) - (p.debtTotal || 0),
+        exitRound: exit[id] || 0
+      }));
+    const alive = all.filter((x) => !x.exitRound);
+    const gone = all.filter((x) => x.exitRound);
+    const a = rankList(alive, (x) => x.score, 1, true);
+    const b = rankList(gone, (x) => x.exitRound, a.length + 1, true);
+    const ranking = a.concat(b).map((x) => {
+      const o = { id: x.id, name: x.name, coins: x.coins, debtTotal: x.debtTotal, score: x.score, rank: x.rank };
+      if (x.exitRound) o.exitRound = x.exitRound;
+      return o;
+    });
+    upd["game"] = { round: rr, phase: "final", pot: g.pot || 0, order: g.order, ranking };
+    await update(ref(db, "rooms/" + roomId), upd);
+    return;
+  }
+
+  // 次のラウンド: 勝者が先頭の席順にして、配札し直す
+  let newOrder = remaining.slice();
+  const wi = g.result && g.result.winner ? newOrder.indexOf(g.result.winner) : -1;
+  if (wi > 0) newOrder = newOrder.slice(wi).concat(newOrder.slice(0, wi));
+
+  const state = { deck: (room.deck || []).slice(), lot: room.lot || 1, notice: "" };
+  Object.keys(room.hands || {}).forEach((id) => {
+    upd["hands/" + id] = null;
+  });
+  newOrder.forEach((id) => {
+    upd["hands/" + id] = draw(state, 3);
+  });
+  upd["deck"] = state.deck.length ? state.deck : null;
+  upd["lot"] = state.lot;
+  const game = {
+    round: rr + 1, phase: "play", pot: g.pot || 0,
+    order: newOrder, turn: newOrder[0], rev: false
+  };
+  if (state.notice) game.notice = note(state.notice);
+  upd["game"] = game;
+  await update(ref(db, "rooms/" + roomId), upd);
+}
+
+// 最終順位画面の「ロビーに戻る」: 部屋をロビーの状態に戻す
+export async function backToLobby(roomId, room) {
+  const upd = {
+    game: null, hands: null, deck: null, lot: null, actions: null,
+    "meta/started": false
+  };
+  Object.entries((room && room.players) || {}).forEach(([id, p]) => {
+    if (p.cpu) {
+      upd["players/" + id] = null;
+      return;
+    }
+    upd["players/" + id + "/spectator"] = false;
+    upd["players/" + id + "/ready"] = false;
+    upd["players/" + id + "/coins"] = null;
+    upd["players/" + id + "/debt"] = null;
+    upd["players/" + id + "/debtTotal"] = null;
+    upd["players/" + id + "/seat"] = null;
+    upd["players/" + id + "/exitRound"] = null;
+  });
+  await update(ref(db, "rooms/" + roomId), upd);
 }

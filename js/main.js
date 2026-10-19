@@ -2,11 +2,15 @@ import {
   db, auth, ref, get, set, update, remove, onValue,
   onDisconnect, signInAnonymously
 } from "./firebase.js";
-import { startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks, checkClear } from "./host.js";
+import {
+  startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks,
+  checkClear, settle, checkResultAcks, sendResultAck, backToLobby
+} from "./host.js";
 import { renderGame } from "./ui.js";
+
 const $ = (id) => document.getElementById(id);
 const show = (name) => {
-    if (name !== "game") document.querySelectorAll(".popup,.overlay").forEach((e) => e.remove());
+  if (name !== "game") document.querySelectorAll(".popup,.overlay").forEach((e) => e.remove());
   ["entry", "lobby", "game"].forEach((s) =>
     $("screen-" + s).classList.toggle("hidden", s !== name)
   );
@@ -101,7 +105,8 @@ async function tryRejoin() {
   const snap = await get(ref(db, "rooms/" + saved + "/players/" + uid));
   if (snap.exists()) enterRoom(saved);
   else localStorage.removeItem("fugo_room");
-      }
+}
+
 function enterRoom(id) {
   roomId = id;
   localStorage.setItem("fugo_room", id);
@@ -184,25 +189,32 @@ function render() {
   $("lobby-msg").textContent =
     host && !allReady ? "全員が準備完了になるとスタートできます" : "";
 
-    if (roomData.meta.started) {
+  if (roomData.meta.started) {
     show("game");
-           renderGame($("game-root"), roomData, uid, onLeaveGame, (act) =>
-      act.type === "ack" ? sendAck(roomId, uid) : sendAction(roomId, uid, act)
-    ); 
+    renderGame($("game-root"), roomData, uid, onLeaveGame, (act) => {
+      if (act.type === "ack") return sendAck(roomId, uid);
+      if (act.type === "rack") return sendResultAck(roomId, uid);
+      if (act.type === "lobby") return backToLobby(roomId, roomData);
+      return sendAction(roomId, uid, act);
+    });
     if (isHost()) {
       processActions(roomId, () => roomData);
       checkFoulAcks(roomId, () => roomData);
       checkClear(roomId, () => roomData);
       maybeCpu(roomId, () => roomData);
+      settle(roomId, () => roomData);
+      checkResultAcks(roomId, () => roomData);
     }
   } else {
     show("lobby");
-    }
+  }
 }
-  function onLeaveGame() {
+
+function onLeaveGame() {
   if (!confirm("本当に退出しますか?")) return;
-  $("btn-leave").onclick();
+  leaveRoom();
 }
+
 ["set-coins", "set-rounds", "set-bidmax", "set-players"].forEach((id) => {
   $(id).onchange = () => {
     if (!isHost()) return;
@@ -228,11 +240,10 @@ $("btn-ready").onclick = () => {
 
 $("btn-start").onclick = () => {
   if (!isHost()) return;
-    startGame(roomId, roomData);
+  startGame(roomId, roomData);
 };
 
-$("btn-leave").onclick = async () => {
-  if (!confirm("本当に退出しますか?")) return;
+async function leaveRoom() {
   const id = roomId;
   const rest = Object.keys((roomData && roomData.players) || {}).filter((k) => k !== uid);
   if (unsub) unsub();
@@ -241,6 +252,11 @@ $("btn-leave").onclick = async () => {
   if (rest.length === 0) await remove(ref(db, "rooms/" + id));
   else await remove(ref(db, "rooms/" + id + "/players/" + uid));
   leaveLocal();
+}
+
+$("btn-leave").onclick = () => {
+  if (!confirm("本当に退出しますか?")) return;
+  leaveRoom();
 };
 
 function leaveLocal() {

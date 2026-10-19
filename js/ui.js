@@ -6,6 +6,8 @@ import {
 let selected = [];
 let lastNoteId = null;
 let winShownId = null;
+let winDone = null;
+let lastArgs = null;
 
 export function cardEl(c, cls) {
   const d = document.createElement("div");
@@ -90,7 +92,78 @@ function askChoice(title, opts) {
     document.body.appendChild(ov);
   });
 }
+
+// 最終順位画面
+function renderFinal(root, g, onAction) {
+  root.innerHTML = "";
+  const t = document.createElement("h2");
+  t.textContent = "🏆 最終順位";
+  root.appendChild(t);
+  const list = document.createElement("div");
+  list.className = "rank-list";
+  (g.ranking || []).forEach((x) => {
+    const row = document.createElement("div");
+    row.className = "rank-row" + (x.rank === 1 ? " first" : "");
+    const left = document.createElement("span");
+    left.textContent = x.rank + "位  " + x.name;
+    const right = document.createElement("span");
+    let txt = "🪙" + x.coins;
+    if (x.debtTotal > 0) txt += "(借金-" + x.debtTotal + " → " + x.score + ")";
+    if (x.exitRound) txt += "  退場(第" + x.exitRound + "ラウンド)";
+    right.textContent = txt;
+    row.appendChild(left);
+    row.appendChild(right);
+    list.appendChild(row);
+  });
+  root.appendChild(list);
+  const b = document.createElement("button");
+  b.className = "btn main";
+  b.textContent = "ロビーに戻る";
+  b.onclick = () => onAction({ type: "lobby" });
+  root.appendChild(b);
+}
+
+// リザルト画面(全員がOKを押すまで進まない)
+function showResult(g, players, onAction) {
+  const r = g.result;
+  const ov = document.createElement("div");
+  ov.className = "overlay resultov";
+  const add = (text, cls) => {
+    const d = document.createElement("div");
+    if (cls) d.className = cls;
+    d.textContent = text;
+    ov.appendChild(d);
+  };
+  const w = r.winner ? players[r.winner] : null;
+  add(w ? "🎉 " + w.name + " さんの勝ち!" : "ノーゲーム");
+  if (r.gain > 0) add("ポット " + r.gain + " 枚を獲得", "rs");
+  else if (r.carry > 0) add("ポット " + r.carry + " 枚は次のラウンドへ持ち越し", "rs");
+  else add("ポットは 0 枚", "rs");
+  (g.order || []).forEach((id) => {
+    const p = players[id];
+    if (!p) return;
+    let line = p.name + "  🪙" + p.coins;
+    if (r.winner === id && r.gain > 0) line += "  (+" + r.gain + ")";
+    add(line, "rs");
+  });
+  if (r.outIds && r.outIds.length) {
+    const names = r.outIds.map((id) => (players[id] ? players[id].name : "")).join("、");
+    add("コインが0枚の " + names + " は退場(観戦になります)", "rs warn");
+  }
+  if (r.last) add("これで対戦は終了です", "rs warn");
+  const b = document.createElement("button");
+  b.className = "btn main";
+  b.textContent = r.last ? "最終順位へ(OK)" : "OK(次のラウンドへ)";
+  b.onclick = () => {
+    ov.remove();
+    onAction({ type: "rack" });
+  };
+  ov.appendChild(b);
+  document.body.appendChild(ov);
+}
+
 export function renderGame(root, room, uid, onLeave, onAction) {
+  lastArgs = [root, room, uid, onLeave, onAction];
   const g = room.game || {};
   const players = room.players || {};
   const hands = room.hands || {};
@@ -101,6 +174,18 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   const myHand = hands[uid] || [];
   selected = selected.filter((c) => myHand.includes(c));
 
+  document.querySelectorAll(".foulov,.resultov").forEach((e) => e.remove());
+
+  if (g.phase === "final") {
+    document.querySelectorAll(".overlay").forEach((e) => e.remove());
+    renderFinal(root, g, onAction);
+    return;
+  }
+  if (g.phase === "play") {
+    winShownId = null;
+    winDone = null;
+  }
+
   if (g.notice && g.notice.id !== lastNoteId) {
     lastNoteId = g.notice.id;
     const pop = document.createElement("div");
@@ -110,7 +195,6 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     setTimeout(() => pop.remove(), 2200);
   }
 
-    document.querySelectorAll(".foulov").forEach((e) => e.remove());
   if (g.foul && !(g.foul.acks && g.foul.acks[uid]) && !spectator) {
     const ov = document.createElement("div");
     ov.className = "overlay foulov";
@@ -131,6 +215,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     };
     document.body.appendChild(ov);
   }
+
   root.innerHTML = "";
 
   const bar = document.createElement("div");
@@ -168,6 +253,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     const box = document.createElement("div");
     box.className = cls;
     ids.forEach((id) => {
+      if (!players[id]) return;
       const h = hands[id] || [];
       box.appendChild(seatEl(id, players[id], h.length, g, spectator, h));
     });
@@ -192,7 +278,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     rv.textContent = "11バック中";
     field.appendChild(rv);
   }
-    if (g.foul && !g.field) {
+  if (g.foul && !g.field) {
     const row = document.createElement("div");
     row.className = "hand";
     (g.foul.cards || []).forEach((c) => row.appendChild(cardEl(c, "small")));
@@ -205,20 +291,33 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   } else {
     field.textContent = "場にカードなし";
   }
-  if (g.phase === "result" && winShownId !== g.winner + "_" + g.round) {
-    winShownId = g.winner + "_" + g.round;
-    const w = players[g.winner];
-    const ov = document.createElement("div");
-    ov.className = "overlay";
-    ov.textContent = w
-      ? "🎉 " + w.name + " さん上がり!!\n(タップで閉じる)"
-      : "ノーゲーム\n(タップで閉じる)";
-    ov.onclick = () => ov.remove();
-    document.body.appendChild(ov);
-  }
   grid.appendChild(field);
   grid.appendChild(mk("g-right", right));
   root.appendChild(grid);
+
+  // 上がり表示(タップで消す)→ リザルト画面(OKで進む)
+  if (g.phase === "result") {
+    const key = g.round + "_" + (g.winner || "none");
+    if (winDone !== key) {
+      if (winShownId !== key) {
+        winShownId = key;
+        const w = players[g.winner];
+        const ov = document.createElement("div");
+        ov.className = "overlay";
+        ov.textContent = w
+          ? "🎉 " + w.name + " さん上がり!!\n(タップで閉じる)"
+          : "ノーゲーム\n(タップで閉じる)";
+        ov.onclick = () => {
+          ov.remove();
+          winDone = key;
+          if (lastArgs) renderGame(...lastArgs);
+        };
+        document.body.appendChild(ov);
+      }
+    } else if (g.result && !spectator && !(g.result.acks && g.result.acks[uid])) {
+      showResult(g, players, onAction);
+    }
+  }
 
   if (spectator) {
     const t = document.createElement("div");
@@ -352,4 +451,4 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   btns.appendChild(playBtn);
   btns.appendChild(passBtn);
   root.appendChild(btns);
-        }
+}
