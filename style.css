@@ -50,6 +50,7 @@ input, select {
   border-radius: 8px;
 }
 .settings { background: rgba(0, 0, 0, 0.2); padding: 8px 12px 14px; border-radius: 10px; }
+
 /* ===== ゲーム画面 ===== */
 .g-bar {
   display: flex;
@@ -137,9 +138,11 @@ input, select {
 .card.small { width: 30px; height: 44px; font-size: 12px; }
 .card.small .s { font-size: 14px; }
 .card.mini { width: 16px; height: 23px; border-radius: 3px; border-width: 1px; }
+
 .passmark { color: #ffd0d0; font-size: 11px; font-weight: bold; }
 .g-btns { display: flex; gap: 10px; }
 .g-btns .btn { margin-top: 4px; }
+
 .revmark {
   color: #ffd84a;
   font-weight: bold;
@@ -176,6 +179,13 @@ input, select {
   justify-content: center;
   z-index: 200;
 }
+.overlay.foulov {
+  flex-direction: column;
+  gap: 14px;
+  color: #ff9a9a;
+}
+.overlay.foulov .small { color: #cfe5da; font-size: 14px; }
+
 .choice {
   position: fixed;
   inset: 0;
@@ -199,9 +209,26 @@ input, select {
   font-weight: bold;
   margin-bottom: 6px;
 }
-.overlay.foulov {
+
+/* ===== リザルト・最終順位 ===== */
+.overlay.resultov {
   flex-direction: column;
-  gap: 14px;
-  color: #ff9a9a;
+  gap: 8px;
+  padding: 20px;
+  font-size: 24px;
 }
-.overlay.foulov .small { color: #cfe5da; font-size: 14px; }
+.overlay.resultov .rs { font-size: 16px; color: #fff; font-weight: normal; }
+.overlay.resultov .rs.warn { color: #ffb0b0; }
+.overlay.resultov .btn { width: 80%; max-width: 320px; margin-top: 16px; }
+.rank-list { margin: 16px 0; }
+.rank-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  font-size: 14px;
+}
+.rank-row.first { background: rgba(242, 194, 48, 0.3); font-weight: bold; }
