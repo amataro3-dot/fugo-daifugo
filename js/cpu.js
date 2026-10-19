@@ -1,4 +1,6 @@
-import { findMoves, effStr, lockChoices, canSpe3, gekCan, isFoulFinish } from "./rules.js";
+import {
+  findMoves, effStr, lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJoker
+} from "./rules.js";
 
 export function cpuChoose(hand, field, rev, lock) {
   if (hand.includes("S3") && canSpe3(field, lock, ["S3"])) {
@@ -29,4 +31,22 @@ export function cpuChoose(hand, field, rev, lock) {
     if (!lock && lockMode === "none") lockMode = "one";
   }
   return { type: "play", cards: m.cards, jsuits: m.jsuits, lock: lockMode, gek };
+}
+
+// カードチェンジ: 反則負けになりそうな札を替える。コインに余裕がなければパス
+export function cpuChange(hand, count, coins) {
+  const pass = { type: "cpass", cards: [] };
+  const cost = Math.pow(2, count);
+  if (count >= 3 || coins < cost) return pass;
+  const bad = hand.filter((c) => isForbidden(c, false));
+  const badNoJoker = bad.filter((c) => !isJoker(c));
+  const allBad = hand.length > 0 && bad.length === hand.length;
+  const change = (c) => ({ type: "change", cards: [c] });
+  if (allBad) return change(badNoJoker[0] || bad[0]);
+  if (coins < cost + 5) return pass;
+  if (badNoJoker.length && Math.random() < 0.7) return change(badNoJoker[0]);
+  if (count === 0 && Math.random() < 0.3) {
+    return change(hand[Math.floor(Math.random() * hand.length)]);
+  }
+  return pass;
 }

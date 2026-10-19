@@ -3,7 +3,7 @@ import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
   canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
 } from "./rules.js";
-import { cpuChoose } from "./cpu.js";
+import { cpuChoose, cpuChange } from "./cpu.js";
 
 function draw(state, n) {
   const out = [];
@@ -65,8 +65,9 @@ export async function startGame(roomId, roomData) {
 
   updates["deck"] = state.deck;
   updates["lot"] = state.lot;
+  // 配札のあとは、カードチェンジから(1ラウンド目は席順の先頭=ランダム)
   updates["game"] = {
-    round: 1, phase: "play", pot: 0, order: seatOrder, turn: seatOrder[0], rev: false
+    round: 1, phase: "change", pot: 0, order: seatOrder, turn: seatOrder[0], rev: false
   };
   updates["meta/started"] = true;
 
@@ -96,9 +97,85 @@ function nextPlayer(order, passed, idx) {
   return null;
 }
 
+// ===== カードチェンジ =====
+
+// 次にチェンジできる人をさがす(パス済み・3回済み・コイン不足の人は飛ばす)
+function pickChanger(order, fromIdx, counts, done, coins) {
+  const n = order.length;
+  for (let i = 1; i <= n; i++) {
+    const id = order[(fromIdx + i) % n];
+    const c = counts[id] || 0;
+    if (!done[id] && c < 3 && (coins[id] || 0) >= Math.pow(2, c)) return id;
+  }
+  return null;
+}
+
+function applyChange(room, act) {
+  const g = room.game;
+  const uid = act.uid;
+  const order = g.order;
+  const idx = order.indexOf(uid);
+  const ch = g.change || {};
+  const counts = Object.assign({}, ch.counts || {});
+  const done = Object.assign({}, ch.done || {});
+  const players = room.players || {};
+  const coinsNow = {};
+  order.forEach((id) => {
+    coinsNow[id] = (players[id] && players[id].coins) || 0;
+  });
+  const cnt = counts[uid] || 0;
+  const upd = {};
+  const chUpd = {};
+  let lotNote = "";
+
+  if (act.type === "change") {
+    const cost = Math.pow(2, cnt);
+    if (cnt >= 3 || done[uid] || coinsNow[uid] < cost) return null;
+    const hand = (room.hands && room.hands[uid]) || [];
+    const card = (act.cards || [])[0];
+    if (!card || !hand.includes(card)) return null;
+    const state = { deck: (room.deck || []).slice(), lot: room.lot || 1, notice: "" };
+    const nc = draw(state, 1)[0];
+    upd["hands/" + uid] = hand.filter((c) => c !== card).concat([nc]);
+    upd["deck"] = state.deck.length ? state.deck : null;
+    upd["lot"] = state.lot;
+    coinsNow[uid] -= cost;
+    upd["players/" + uid + "/coins"] = coinsNow[uid];
+    upd["game/pot"] = (g.pot || 0) + cost;
+    counts[uid] = cnt + 1;
+    chUpd["game/change/counts/" + uid] = cnt + 1;
+    lotNote = state.notice;
+  } else if (act.type === "cpass") {
+    done[uid] = true;
+    chUpd["game/change/done/" + uid] = true;
+  } else {
+    return null;
+  }
+
+  const next = pickChanger(order, idx, counts, done, coinsNow);
+  if (next) {
+    Object.assign(upd, chUpd);
+    upd["game/turn"] = next;
+    if (lotNote) upd["game/notice"] = note(lotNote);
+  } else {
+    // チェンジ終了 → 対戦へ(親は、親決めオークションができるまで仮に席の先頭)
+    const parent = order[0];
+    const pn = players[parent];
+    upd["game/phase"] = "play";
+    upd["game/turn"] = parent;
+    upd["game/change"] = null;
+    upd["game/notice"] = note(
+      (lotNote ? lotNote + "\n" : "") + "対戦スタート!\n" + (pn ? pn.name : "") + " さんから"
+    );
+  }
+  return upd;
+}
+
 function applyAction(room, act) {
   const g = room.game;
-  if (!g || g.phase !== "play" || act.uid !== g.turn) return null;
+  if (!g || act.uid !== g.turn) return null;
+  if (g.phase === "change") return applyChange(room, act);
+  if (g.phase !== "play") return null;
   if (g.foul || g.clear) return null;
   const uid = act.uid;
   curOut = g.out || {};
@@ -294,20 +371,28 @@ export function maybeCpu(roomId, getRoom) {
   if (cpuTimer) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || g.phase !== "play" || room.actions || g.foul || g.clear) return;
+  if (!g || room.actions || g.foul || g.clear) return;
+  if (g.phase !== "play" && g.phase !== "change") return;
   const p = room.players && room.players[g.turn];
   if (!p || !p.cpu) return;
   const turn = g.turn;
+  const phase = g.phase;
   cpuTimer = setTimeout(() => {
     cpuTimer = null;
     const r = getRoom();
     if (!r || !r.game) return;
     const gg = r.game;
-    if (gg.phase !== "play" || gg.turn !== turn || gg.foul || gg.clear || r.actions) {
+    if (gg.phase !== phase || gg.turn !== turn || gg.foul || gg.clear || r.actions) {
       maybeCpu(roomId, getRoom);
       return;
     }
     const hand = (r.hands && r.hands[turn]) || [];
+    if (phase === "change") {
+      const cnt = ((gg.change && gg.change.counts) || {})[turn] || 0;
+      const coins = (r.players[turn] && r.players[turn].coins) || 0;
+      sendAction(roomId, turn, cpuChange(hand, cnt, coins));
+      return;
+    }
     const a = cpuChoose(hand, gg.field || null, !!gg.rev, gg.lock || null);
     sendAction(roomId, turn, a);
   }, 1500);
@@ -335,9 +420,8 @@ export function checkClear(roomId, getRoom) {
   }, 1500);
 }
 
-// ===== ここから: 精算・リザルト・次ラウンド・最終順位 =====
+// ===== 精算・リザルト・次ラウンド・最終順位 =====
 
-// ラウンド終了の精算(勝者がポットを受け取る)。ホストだけが呼ぶ
 let settling = false;
 export async function settle(roomId, getRoom) {
   if (settling) return;
@@ -381,7 +465,6 @@ export function sendResultAck(roomId, uid) {
   return set(ref(db, "rooms/" + roomId + "/game/result/acks/" + uid), true);
 }
 
-// 全員がOKを押したら次へ(コンピューター・観戦者・切断中の人は待たない)
 let advancing = false;
 export async function checkResultAcks(roomId, getRoom) {
   if (advancing) return;
@@ -403,7 +486,6 @@ export async function checkResultAcks(roomId, getRoom) {
 
 function rankList(list, keyFn, startRank, desc) {
   const sorted = list.slice().sort((a, b) => (desc ? keyFn(b) - keyFn(a) : keyFn(a) - keyFn(b)));
-  let rank = startRank;
   sorted.forEach((x, i) => {
     if (i > 0 && keyFn(x) === keyFn(sorted[i - 1])) x.rank = sorted[i - 1].rank;
     else x.rank = startRank + i;
@@ -457,7 +539,6 @@ async function nextRound(roomId, room) {
     return;
   }
 
-  // 次のラウンド: 勝者が先頭の席順にして、配札し直す
   let newOrder = remaining.slice();
   const wi = g.result && g.result.winner ? newOrder.indexOf(g.result.winner) : -1;
   if (wi > 0) newOrder = newOrder.slice(wi).concat(newOrder.slice(0, wi));
@@ -472,7 +553,7 @@ async function nextRound(roomId, room) {
   upd["deck"] = state.deck.length ? state.deck : null;
   upd["lot"] = state.lot;
   const game = {
-    round: rr + 1, phase: "play", pot: g.pot || 0,
+    round: rr + 1, phase: "change", pot: g.pot || 0,
     order: newOrder, turn: newOrder[0], rev: false
   };
   if (state.notice) game.notice = note(state.notice);
@@ -480,7 +561,6 @@ async function nextRound(roomId, room) {
   await update(ref(db, "rooms/" + roomId), upd);
 }
 
-// 最終順位画面の「ロビーに戻る」: 部屋をロビーの状態に戻す
 export async function backToLobby(roomId, room) {
   const upd = {
     game: null, hands: null, deck: null, lot: null, actions: null,

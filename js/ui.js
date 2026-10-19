@@ -53,6 +53,17 @@ function seatEl(id, p, count, game, openHand, hand) {
   d.appendChild(nm);
   d.appendChild(coin);
   d.appendChild(backs);
+  if (game.phase === "change") {
+    const ch = game.change || {};
+    const n = (ch.counts && ch.counts[id]) || 0;
+    const fin = ch.done && ch.done[id];
+    if (n > 0 || fin) {
+      const t = document.createElement("div");
+      t.className = "small";
+      t.textContent = "チェンジ" + n + "回" + (fin ? "・終了" : "");
+      d.appendChild(t);
+    }
+  }
   if (game.out && game.out[id]) {
     const fm = document.createElement("div");
     fm.className = "passmark";
@@ -93,7 +104,6 @@ function askChoice(title, opts) {
   });
 }
 
-// 最終順位画面
 function renderFinal(root, g, onAction) {
   root.innerHTML = "";
   const t = document.createElement("h2");
@@ -123,7 +133,6 @@ function renderFinal(root, g, onAction) {
   root.appendChild(b);
 }
 
-// リザルト画面(全員がOKを押すまで進まない)
 function showResult(g, players, onAction) {
   const r = g.result;
   const ov = document.createElement("div");
@@ -181,7 +190,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     renderFinal(root, g, onAction);
     return;
   }
-  if (g.phase === "play") {
+  if (g.phase === "play" || g.phase === "change") {
     winShownId = null;
     winDone = null;
   }
@@ -288,6 +297,8 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     row.className = "hand";
     g.field.cards.forEach((c) => row.appendChild(cardEl(c, "small")));
     field.appendChild(row);
+  } else if (g.phase === "change") {
+    field.textContent = "カードチェンジ中";
   } else {
     field.textContent = "場にカードなし";
   }
@@ -295,7 +306,6 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   grid.appendChild(mk("g-right", right));
   root.appendChild(grid);
 
-  // 上がり表示(タップで消す)→ リザルト画面(OKで進む)
   if (g.phase === "result") {
     const key = g.round + "_" + (g.winner || "none");
     if (winDone !== key) {
@@ -327,7 +337,8 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     return;
   }
 
-  const myTurn = g.phase === "play" && g.turn === uid;
+  const inChange = g.phase === "change";
+  const myTurn = (g.phase === "play" || inChange) && g.turn === uid;
   const info = document.createElement("div");
   info.className = "me-box";
   info.textContent =
@@ -349,8 +360,13 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     const el = cardEl(c);
     if (selected.includes(c)) el.classList.add("sel");
     el.onclick = () => {
-      if (selected.includes(c)) selected = selected.filter((x) => x !== c);
-      else if (selected.length < 3) selected.push(c);
+      if (selected.includes(c)) {
+        selected = selected.filter((x) => x !== c);
+      } else if (inChange) {
+        selected = [c];
+      } else if (selected.length < 3) {
+        selected.push(c);
+      }
       renderGame(root, room, uid, onLeave, onAction);
     };
     hd.appendChild(el);
@@ -363,6 +379,59 @@ export function renderGame(root, room, uid, onLeave, onAction) {
 
   const btns = document.createElement("div");
   btns.className = "g-btns";
+
+  // ===== カードチェンジ中のボタン =====
+  if (inChange) {
+    const ch = g.change || {};
+    const cnt = (ch.counts && ch.counts[uid]) || 0;
+    const cost = Math.pow(2, cnt);
+    const fin = !!(ch.done && ch.done[uid]);
+    const canChange = myTurn && !fin && cnt < 3 && (me.coins || 0) >= cost;
+    if (myTurn) {
+      msg.textContent = "替えるカードを1枚選んでください(コスト " + cost + " コイン)";
+    } else if (fin || cnt >= 3) {
+      msg.textContent = "あなたのチェンジは終了しました";
+    } else {
+      msg.textContent = "他の人のチェンジを待っています";
+    }
+    const chBtn = document.createElement("button");
+    chBtn.className = "btn main";
+    chBtn.textContent = "チェンジ(" + cost + "コイン)";
+    chBtn.disabled = !canChange;
+    chBtn.onclick = () => {
+      if (selected.length !== 1) {
+        msg.textContent = "替えるカードを1枚選んでください";
+        return;
+      }
+      const card = selected[0];
+      selected = [];
+      onAction({ type: "change", cards: [card] });
+    };
+    const cpBtn = document.createElement("button");
+    cpBtn.className = "btn";
+    cpBtn.textContent = "パス(チェンジ終了)";
+    cpBtn.disabled = !myTurn;
+    cpBtn.onclick = async () => {
+      if (canChange && myHand.length && myHand.every((c) => isForbidden(c, false))) {
+        const ok = await askChoice(
+          "このままだと反則負けになりますが、本当にチェンジしなくていいですか?",
+          [
+            { label: "チェンジしない(パス)", value: "yes" },
+            { label: "やめる", value: "no" }
+          ]
+        );
+        if (ok !== "yes") return;
+      }
+      selected = [];
+      onAction({ type: "cpass" });
+    };
+    btns.appendChild(chBtn);
+    btns.appendChild(cpBtn);
+    root.appendChild(btns);
+    return;
+  }
+
+  // ===== 対戦中のボタン =====
   const playBtn = document.createElement("button");
   playBtn.className = "btn main";
   playBtn.textContent = "出す";
