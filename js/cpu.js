@@ -84,3 +84,11 @@ export function cpuChange(hand, count, coins) {
   }
   return pass;
 }
+
+// ===== 席決めオークション =====
+// 少なめに入札(1〜2枚)、ときどきパス
+export function cpuSeatBid(coins, max) {
+  const cap = Math.min(max, coins);
+  if (cap < 1 || coins < 6 || Math.random() < 0.3) return { type: "spass" };
+  return { type: "sbid", n: Math.min(cap, 1 + Math.floor(Math.random() * 2)) };
+}

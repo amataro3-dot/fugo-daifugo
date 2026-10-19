@@ -3,7 +3,7 @@ import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
   canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
 } from "./rules.js";
-import { cpuChoose, cpuChange, cpuBid, cpuRaise } from "./cpu.js";
+import { cpuChoose, cpuChange, cpuBid, cpuRaise, cpuSeatBid } from "./cpu.js";
 
 function draw(state, n) {
   const out = [];
@@ -187,6 +187,7 @@ function nameOf(players, id) {
 function goPlay(upd, parent, text) {
   upd["game/phase"] = "play";
   upd["game/turn"] = parent;
+  upd["game/parent"] = parent; // 次のラウンドの席決めで使う(前回の親)
   upd["game/bid"] = null;
   upd["game/notice"] = note(text);
 }
@@ -359,6 +360,7 @@ function applyAction(room, act) {
   const g = room.game;
   if (!g) return null;
   if (g.phase === "bid") return applyBid(room, act);
+  if (g.phase === "seat") return applySeat(room, act);
   if (act.uid !== g.turn) return null;
   if (g.phase === "change") return applyChange(room, act);
   if (g.phase !== "play") return null;
@@ -579,6 +581,7 @@ export function maybeCpu(roomId, getRoom) {
   const g = room && room.game;
   if (!g || room.actions || g.foul || g.clear) return;
   if (g.phase === "bid") return maybeCpuBid(roomId, getRoom);
+  if (g.phase === "seat") return maybeCpuSeat(roomId, getRoom);
   if (g.phase !== "play" && g.phase !== "change") return;
   const p = room.players && room.players[g.turn];
   if (!p || !p.cpu) return;
@@ -640,6 +643,45 @@ function maybeCpuBid(roomId, getRoom) {
       if (gg.turn !== who || gg.bid.top !== top) return maybeCpu(roomId, getRoom);
       const pay = gg.bid.top + 1 - ((gg.bid.bids || {})[who] || 0);
       sendAction(roomId, who, { type: cpuRaise(hand, coins, pay) ? "raise" : "fold" });
+    }
+  }, stage === "blind" ? 800 : 1500);
+}
+
+// コンピューターの席決め(入札 or パス、競り合い、席選び)
+function maybeCpuSeat(roomId, getRoom) {
+  const room = getRoom();
+  const g = room.game;
+  const s = g.seat;
+  if (!s) return;
+  const isCpu = (id) => room.players[id] && room.players[id].cpu;
+  let who = null;
+  if (s.stage === "blind") {
+    const bids = s.bids || {};
+    who = (s.need || []).find((id) => bids[id] === undefined && isCpu(id)) || null;
+  } else if ((s.stage === "raise" || s.stage === "pick") && isCpu(g.turn)) {
+    who = g.turn;
+  }
+  if (!who) return;
+  const stage = s.stage;
+  const key = JSON.stringify(s);
+  cpuTimer = setTimeout(() => {
+    cpuTimer = null;
+    const r = getRoom();
+    const gg = r && r.game;
+    if (!gg || gg.phase !== "seat" || !gg.seat || r.actions || JSON.stringify(gg.seat) !== key) {
+      maybeCpu(roomId, getRoom);
+      return;
+    }
+    const ss = gg.seat;
+    const coins = (r.players[who] && r.players[who].coins) || 0;
+    if (stage === "blind") {
+      sendAction(roomId, who, cpuSeatBid(coins, SEAT_MAX));
+    } else if (stage === "raise") {
+      const pay = ss.raise.top + 1 - ((ss.bids || {})[who] || 0);
+      sendAction(roomId, who, { type: cpuRaise([], coins, pay) ? "raise" : "fold" });
+    } else {
+      const empty = (ss.seats || []).map((x, i) => (x ? -1 : i)).filter((i) => i >= 0);
+      sendAction(roomId, who, { type: "pick", n: empty[Math.floor(Math.random() * empty.length)] });
     }
   }, stage === "blind" ? 800 : 1500);
 }
@@ -785,26 +827,341 @@ async function nextRound(roomId, room) {
     return;
   }
 
-  let newOrder = remaining.slice();
-  const wi = g.result && g.result.winner ? newOrder.indexOf(g.result.winner) : -1;
-  if (wi > 0) newOrder = newOrder.slice(wi).concat(newOrder.slice(0, wi));
-
-  const state = { deck: (room.deck || []).slice(), lot: room.lot || 1, notice: "" };
   Object.keys(room.hands || {}).forEach((id) => {
     upd["hands/" + id] = null;
   });
-  newOrder.forEach((id) => {
+
+  // 3人以上なら席決めオークション
+  if (remaining.length >= 3) {
+    const s = startSeat(room, g, remaining);
+    if (s.need.length === 0) {
+      finishSeats(upd, room, s, rr + 1, g.pot || 0);
+    } else {
+      upd["game"] = {
+        round: rr + 1, phase: "seat", pot: g.pot || 0, order: remaining, seat: s,
+        notice: note("席決めオークション!\n" + (s.first ? "前回の勝者が先に座ります\n" : "") + "入札するかパスを選んでください")
+      };
+    }
+    await update(ref(db, "rooms/" + roomId), upd);
+    return;
+  }
+
+  // 2人だけのときは席順で変わらないので、そのまま(勝者が先頭)
+  let newOrder = remaining.slice();
+  const wi = g.result && g.result.winner ? newOrder.indexOf(g.result.winner) : -1;
+  if (wi > 0) newOrder = newOrder.slice(wi).concat(newOrder.slice(0, wi));
+  dealAndChange(upd, room, newOrder, newOrder[0], rr + 1, g.pot || 0, "");
+  await update(ref(db, "rooms/" + roomId), upd);
+}
+
+// 3枚ずつ配って、カードチェンジを始める
+function dealAndChange(upd, room, order, firstTurn, round, pot, text) {
+  // game を丸ごと書き直すので、game/〜 の書き込みは消しておく(同時に書くとエラーになるため)
+  Object.keys(upd).forEach((k) => {
+    if (k.startsWith("game/")) delete upd[k];
+  });
+  const state = { deck: (room.deck || []).slice(), lot: room.lot || 1, notice: "" };
+  order.forEach((id) => {
     upd["hands/" + id] = draw(state, 3);
   });
   upd["deck"] = state.deck.length ? state.deck : null;
   upd["lot"] = state.lot;
-  const game = {
-    round: rr + 1, phase: "change", pot: g.pot || 0,
-    order: newOrder, turn: newOrder[0], rev: false
-  };
-  if (state.notice) game.notice = note(state.notice);
+  const game = { round, phase: "change", pot, order, turn: firstTurn, rev: false };
+  const msg = [text, state.notice].filter(Boolean).join("\n");
+  if (msg) game.notice = note(msg);
   upd["game"] = game;
-  await update(ref(db, "rooms/" + roomId), upd);
+}
+
+// ===== 席決めオークション =====
+//
+// game/seat の中身
+//   stage: "blind"(伏せて入札) / "open"(一斉公開) / "raise"(同点の競り合い) / "pick"(席を選ぶ)
+//   ask:   席を決める人(勝者以外)。前回の親の次の人からの順
+//   need:  入札・パスを選ぶ人(コイン1枚以上)
+//   first: 前回の勝者(先に座っている)
+//   seats: テーブルの席(時計回り)。空席は ""
+//   bids:  {人: 枚数}(0 はパス)
+//   groups: まだ順番が決まっていない入札額ごとのグループ
+//   rank:  席を選ぶ順(決まった分)
+//   raise: 競り合い中の情報 {tied, folded, foldOrder, top}
+//   queue: これから席を選ぶ人
+
+const SEAT_MAX = 5;
+
+function startSeat(room, g, remaining) {
+  const players = room.players || {};
+  const winner = g.result && g.result.winner && remaining.includes(g.result.winner)
+    ? g.result.winner : null;
+  const N = remaining.length;
+  const seats = Array(N).fill("");
+  if (winner) seats[Math.floor(Math.random() * N)] = winner;
+  const prev = g.order || [];
+  const pi = prev.indexOf(g.parent);
+  const rot = pi >= 0 ? prev.slice(pi + 1).concat(prev.slice(0, pi + 1)) : prev.slice();
+  const ask = rot.filter((id) => remaining.includes(id) && id !== winner);
+  const need = ask.filter((id) => ((players[id] && players[id].coins) || 0) >= 1);
+  const s = { stage: "blind", ask, need, seats };
+  if (winner) s.first = winner;
+  return s;
+}
+
+// Firebaseから読んだ席決めデータを、扱いやすい形にそろえる(空の配列などが消えるため)
+function normSeat(s) {
+  const o = JSON.parse(JSON.stringify(s || {}));
+  o.ask = o.ask || [];
+  o.need = o.need || [];
+  o.seats = o.seats || [];
+  o.bids = o.bids || {};
+  o.groups = (o.groups || []).map((x) => x || []);
+  o.rank = o.rank || [];
+  o.queue = o.queue || [];
+  if (o.raise) {
+    o.raise.folded = o.raise.folded || {};
+    o.raise.foldOrder = o.raise.foldOrder || [];
+  }
+  return o;
+}
+
+// 競り合いで次に聞く人(コイン不足は自動で降りる)。決着したら done
+function seatRaiseNext(s, coins, startIdx, notes, players) {
+  const R = s.raise;
+  const tied = R.tied;
+  for (let k = 0; k < tied.length; k++) {
+    const alive = tied.filter((id) => !R.folded[id]);
+    if (alive.length <= 1) return { done: alive[0] };
+    const id = tied[(startIdx + k) % tied.length];
+    if (R.folded[id]) continue;
+    const need = R.top + 1 - (s.bids[id] || 0);
+    if ((coins[id] || 0) >= need) return { turn: id };
+    R.folded[id] = true;
+    R.foldOrder.push(id);
+    notes.push(nameOf(players, id) + " さんはコイン不足で降りました");
+  }
+  const alive = tied.filter((id) => !R.folded[id]);
+  return { done: alive[0] };
+}
+
+// 競り合いが決着 → 選ぶ順に足す(残った人、そのあと後から降りた人から)
+function seatRaiseDone(s, winnerId) {
+  s.rank.push(winnerId);
+  s.raise.foldOrder.slice().reverse().forEach((id) => s.rank.push(id));
+  s.raise = null;
+}
+
+// 残りのグループを順に片づける。競り合いが始まれば {turn}、全部決まれば {pick}
+function seatAdvance(s, coins, notes, players) {
+  for (;;) {
+    const gr = s.groups.shift();
+    if (!gr) return { pick: true };
+    if (gr.length === 1) {
+      s.rank.push(gr[0]);
+      continue;
+    }
+    const names = gr.map((id) => nameOf(players, id)).join("・");
+    if (!gr.some((id) => (coins[id] || 0) >= 1)) {
+      shuffle(gr).forEach((id) => s.rank.push(id));
+      notes.push(names + " は同点でコイン不足のため抽選");
+      continue;
+    }
+    s.raise = { tied: gr, folded: {}, foldOrder: [], top: s.bids[gr[0]] };
+    notes.push("同点!" + names + " で競り合い(" + s.bids[gr[0]] + "枚)");
+    const r = seatRaiseNext(s, coins, 0, notes, players);
+    if (r.turn) return { turn: r.turn };
+    seatRaiseDone(s, r.done);
+  }
+}
+
+// 席を選ぶ段階へ(だれも選ばなければ、すぐ全員ランダム)
+function seatToPick(upd, room, s, pot, notes) {
+  const players = room.players || {};
+  s.stage = "pick";
+  s.queue = s.rank.slice();
+  s.raise = null;
+  if (!s.queue.length) {
+    finishSeats(upd, room, s, room.game.round, pot, notes.join("\n"));
+    return;
+  }
+  upd["game/seat"] = cleanSeat(s);
+  upd["game/turn"] = s.queue[0];
+  notes.push(nameOf(players, s.queue[0]) + " さんから席を選びます");
+  upd["game/notice"] = note(notes.join("\n"));
+}
+
+// Firebaseに書く前に、空のものを消す
+function cleanSeat(s) {
+  const o = JSON.parse(JSON.stringify(s));
+  if (!o.groups.length) delete o.groups;
+  if (!o.rank.length) delete o.rank;
+  if (!o.queue.length) delete o.queue;
+  if (!o.raise) delete o.raise;
+  else {
+    if (!Object.keys(o.raise.folded).length) delete o.raise.folded;
+    if (!o.raise.foldOrder.length) delete o.raise.foldOrder;
+  }
+  if (!Object.keys(o.bids).length) delete o.bids;
+  if (o.first === undefined) delete o.first;
+  return o;
+}
+
+// 席が全部決まった → 余った席にランダムで座らせて、配札・チェンジへ
+function finishSeats(upd, room, s, round, pot, text) {
+  const seats = (s.seats || []).slice();
+  const placed = new Set(seats.filter(Boolean));
+  const rest = shuffle((s.ask || []).filter((id) => !placed.has(id)));
+  for (let i = 0; i < seats.length; i++) if (!seats[i]) seats[i] = rest.shift();
+  const first = s.first || seats[0];
+  dealAndChange(upd, room, seats, first, round, pot,
+    [text, "席が決まりました!"].filter(Boolean).join("\n"));
+}
+
+function applySeat(room, act) {
+  const g = room.game;
+  if (!g.seat) return null;
+  const s = normSeat(g.seat);
+  const uid = act.uid;
+  const players = room.players || {};
+  const coins = {};
+  Object.keys(players).forEach((id) => {
+    coins[id] = players[id].coins || 0;
+  });
+  let pot = g.pot || 0;
+  const upd = {};
+  const notes = [];
+
+  // --- 伏せて入札 / パス ---
+  if (s.stage === "blind") {
+    if (act.type !== "sbid" && act.type !== "spass") return null;
+    if (!s.need.includes(uid) || s.bids[uid] !== undefined) return null;
+    let n = 0;
+    if (act.type === "sbid") {
+      n = Math.floor(Number(act.n) || 0);
+      if (n < 1 || n > Math.min(SEAT_MAX, coins[uid])) return null;
+    }
+    s.bids[uid] = n;
+    if (!s.need.every((id) => s.bids[id] !== undefined)) {
+      upd["game/seat/bids/" + uid] = n;
+      return upd;
+    }
+    s.need.forEach((id) => {
+      if (s.bids[id] > 0) {
+        pot += s.bids[id];
+        upd["players/" + id + "/coins"] = coins[id] - s.bids[id];
+      }
+    });
+    upd["game/pot"] = pot;
+    s.stage = "open";
+    s.id = Date.now();
+    upd["game/seat"] = cleanSeat(s);
+    upd["game/notice"] = note("一斉公開!");
+    return upd;
+  }
+
+  // --- 同点の競り合い ---
+  if (s.stage === "raise") {
+    if (uid !== g.turn || !s.raise) return null;
+    const R = s.raise;
+    const idx = R.tied.indexOf(uid);
+    if (act.type === "raise") {
+      const pay = R.top + 1 - (s.bids[uid] || 0);
+      if (coins[uid] < pay) return null;
+      coins[uid] -= pay;
+      pot += pay;
+      s.bids[uid] = R.top + 1;
+      R.top += 1;
+      upd["players/" + uid + "/coins"] = coins[uid];
+      upd["game/pot"] = pot;
+      notes.push(nameOf(players, uid) + " さん上乗せ → " + R.top + "枚");
+    } else if (act.type === "fold") {
+      R.folded[uid] = true;
+      R.foldOrder.push(uid);
+      notes.push(nameOf(players, uid) + " さんは降りました");
+    } else {
+      return null;
+    }
+    const r = seatRaiseNext(s, coins, idx + 1, notes, players);
+    if (r.turn) {
+      upd["game/seat"] = cleanSeat(s);
+      upd["game/turn"] = r.turn;
+      upd["game/notice"] = note(notes.join("\n"));
+      return upd;
+    }
+    seatRaiseDone(s, r.done);
+    const a = seatAdvance(s, coins, notes, players);
+    if (a.turn) {
+      upd["game/seat"] = cleanSeat(s);
+      upd["game/turn"] = a.turn;
+      upd["game/notice"] = note(notes.join("\n"));
+      return upd;
+    }
+    seatToPick(upd, room, s, pot, notes);
+    return upd;
+  }
+
+  // --- 席を選ぶ ---
+  if (s.stage === "pick") {
+    if (act.type !== "pick" || uid !== g.turn || s.queue[0] !== uid) return null;
+    const slot = Math.floor(Number(act.n));
+    if (!(slot >= 0 && slot < s.seats.length) || s.seats[slot] !== "") return null;
+    s.seats[slot] = uid;
+    s.queue.shift();
+    if (!s.queue.length) {
+      finishSeats(upd, room, s, g.round, pot, nameOf(players, uid) + " さんが着席");
+      return upd;
+    }
+    upd["game/seat"] = cleanSeat(s);
+    upd["game/turn"] = s.queue[0];
+    upd["game/notice"] = note(
+      nameOf(players, uid) + " さんが着席\n次は " + nameOf(players, s.queue[0]) + " さん"
+    );
+    return upd;
+  }
+  return null;
+}
+
+// 一斉公開を約3秒見せてから、選ぶ順を決める(ホストだけが呼ぶ)
+let seatTimer = null;
+export function checkSeat(roomId, getRoom) {
+  if (seatTimer) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || g.phase !== "seat" || !g.seat || g.seat.stage !== "open") return;
+  const openId = g.seat.id;
+  seatTimer = setTimeout(async () => {
+    seatTimer = null;
+    const r = getRoom();
+    const gg = r && r.game;
+    if (!gg || gg.phase !== "seat" || !gg.seat || gg.seat.stage !== "open" || gg.seat.id !== openId) return;
+    const s = normSeat(gg.seat);
+    const players = r.players || {};
+    const coins = {};
+    Object.keys(players).forEach((id) => {
+      coins[id] = players[id].coins || 0;
+    });
+    const notes = [];
+    const bidders = s.need.filter((id) => s.bids[id] > 0);
+    const fives = bidders.filter((id) => s.bids[id] === SEAT_MAX);
+    if (fives.length === 1) {
+      // 5枚が単独 → その人だけが選んで、他はランダム
+      s.rank = [fives[0]];
+      s.groups = [];
+      notes.push(nameOf(players, fives[0]) + " さんが5枚!\n他の人はランダムです");
+    } else {
+      const vals = [...new Set(bidders.map((id) => s.bids[id]))].sort((a, b) => b - a);
+      s.groups = vals.map((v) => s.ask.filter((id) => bidders.includes(id) && s.bids[id] === v));
+      s.rank = [];
+    }
+    const upd = {};
+    const a = seatAdvance(s, coins, notes, players);
+    if (a.turn) {
+      s.stage = "raise";
+      upd["game/seat"] = cleanSeat(s);
+      upd["game/turn"] = a.turn;
+      upd["game/notice"] = note(notes.join("\n") + "\n1枚ずつ上乗せ。降りた人が後");
+    } else {
+      seatToPick(upd, r, s, gg.pot || 0, notes);
+    }
+    await update(ref(db, "rooms/" + roomId), upd);
+  }, 3000);
 }
 
 export async function backToLobby(roomId, room) {
