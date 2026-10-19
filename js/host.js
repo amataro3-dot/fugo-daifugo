@@ -3,7 +3,7 @@ import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
   canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
 } from "./rules.js";
-import { cpuChoose, cpuChange } from "./cpu.js";
+import { cpuChoose, cpuChange, cpuBid, cpuRaise } from "./cpu.js";
 
 function draw(state, n) {
   const out = [];
@@ -82,7 +82,9 @@ export function sendAction(roomId, uid, act) {
     cards: act.cards || [],
     jsuits: act.jsuits || null,
     lock: act.lock || "none",
-    gek: !!act.gek
+    lockSuit: act.lockSuit || null,
+    gek: !!act.gek,
+    n: act.n || 0
   });
 }
 
@@ -158,22 +160,206 @@ function applyChange(room, act) {
     upd["game/turn"] = next;
     if (lotNote) upd["game/notice"] = note(lotNote);
   } else {
-    // チェンジ終了 → 対戦へ(親は、親決めオークションができるまで仮に席の先頭)
-    const parent = order[0];
-    const pn = players[parent];
-    upd["game/phase"] = "play";
-    upd["game/turn"] = parent;
+    // チェンジ終了 → 親決めのブラインドオークションへ
     upd["game/change"] = null;
-    upd["game/notice"] = note(
-      (lotNote ? lotNote + "\n" : "") + "対戦スタート!\n" + (pn ? pn.name : "") + " さんから"
-    );
+    startBid(upd, order, coinsNow, players, lotNote);
   }
   return upd;
 }
 
+// ===== ブラインドオークション(親決め) =====
+//
+// game/bid の中身
+//   stage: "blind"(伏せて入札中) / "open"(一斉公開を見せている) / "raise"(同点の競り上げ中)
+//   need:  入札する人(コインを1枚以上持っている人)
+//   bids:  {人: 今までに出した合計枚数}
+//   top:   いちばん高い枚数
+//   parent: 親に決まった人(open のときだけ)
+//   tied:  同点で競り上げる人(席順)
+//   folded: {人: true} 競り上げで降りた人
+//   id:    公開した時刻(公開を約3秒見せるため)
+
+function nameOf(players, id) {
+  return (players[id] && players[id].name) || "";
+}
+
+// 対戦スタート(親が決まった)
+function goPlay(upd, parent, text) {
+  upd["game/phase"] = "play";
+  upd["game/turn"] = parent;
+  upd["game/bid"] = null;
+  upd["game/notice"] = note(text);
+}
+
+// チェンジのあとに呼ぶ。コインがある人だけ入札する
+function startBid(upd, order, coinsNow, players, lotNote) {
+  const head = lotNote ? lotNote + "\n" : "";
+  const need = order.filter((id) => (coinsNow[id] || 0) >= 1);
+  if (need.length === 0) {
+    const p = order[0];
+    goPlay(upd, p, head + "コインを持っている人がいないため\n" + nameOf(players, p) + " さんから");
+    return;
+  }
+  upd["game/phase"] = "bid";
+  upd["game/turn"] = null;
+  upd["game/bid"] = { stage: "blind", need };
+  upd["game/notice"] = note(head + "親決めオークション!\n賭ける枚数を選んでください");
+}
+
+// 競り上げで、次に聞く人をさがす(コインが足りない人は自動で降りる)
+function raiseNext(bid, coins, startIdx, notes, players) {
+  const tied = bid.tied;
+  const folded = bid.folded;
+  for (let k = 0; k < tied.length; k++) {
+    const alive = tied.filter((id) => !folded[id]);
+    if (alive.length <= 1) return { parent: alive[0] };
+    const id = tied[(startIdx + k) % tied.length];
+    if (folded[id]) continue;
+    const need = bid.top + 1 - (bid.bids[id] || 0);
+    if ((coins[id] || 0) >= need) return { turn: id };
+    folded[id] = true;
+    notes.push(nameOf(players, id) + " さんはコイン不足で降りました");
+  }
+  const alive = tied.filter((id) => !folded[id]);
+  return { parent: alive[0] };
+}
+
+function applyBid(room, act) {
+  const g = room.game;
+  const b = g.bid;
+  if (!b) return null;
+  const uid = act.uid;
+  const players = room.players || {};
+  const coins = {};
+  (g.order || []).forEach((id) => {
+    coins[id] = (players[id] && players[id].coins) || 0;
+  });
+  const need = b.need || [];
+  const bids = Object.assign({}, b.bids || {});
+  const max = (room.settings && room.settings.bidMax) || 5;
+  const upd = {};
+
+  // --- 伏せて入札 ---
+  if (b.stage === "blind") {
+    if (act.type !== "bid") return null;
+    if (!need.includes(uid) || bids[uid]) return null;
+    const n = Math.floor(Number(act.n) || 0);
+    if (n < 1 || n > Math.min(max, coins[uid])) return null;
+    bids[uid] = n;
+    if (!need.every((id) => bids[id])) {
+      upd["game/bid/bids/" + uid] = n;
+      return upd;
+    }
+    // 全員そろった → 一斉公開。コインをポットへ
+    let sum = 0;
+    need.forEach((id) => {
+      sum += bids[id];
+      upd["players/" + id + "/coins"] = coins[id] - bids[id];
+    });
+    upd["game/pot"] = (g.pot || 0) + sum;
+    const top = Math.max(...need.map((id) => bids[id]));
+    const tops = need.filter((id) => bids[id] === top);
+    const nb = { stage: "open", need, bids, top, id: Date.now() };
+    if (tops.length === 1) nb.parent = tops[0];
+    else nb.tied = tops;
+    upd["game/bid"] = nb;
+    upd["game/notice"] = note("一斉公開!");
+    return upd;
+  }
+
+  // --- 同点の競り上げ ---
+  if (b.stage === "raise") {
+    if (uid !== g.turn) return null;
+    const nb = {
+      stage: "raise", need, bids, top: b.top,
+      tied: (b.tied || []).slice(), folded: Object.assign({}, b.folded || {})
+    };
+    const idx = nb.tied.indexOf(uid);
+    const notes = [];
+    if (act.type === "raise") {
+      const pay = nb.top + 1 - (bids[uid] || 0);
+      if (coins[uid] < pay) return null;
+      coins[uid] -= pay;
+      bids[uid] = nb.top + 1;
+      nb.top += 1;
+      upd["players/" + uid + "/coins"] = coins[uid];
+      upd["game/pot"] = (g.pot || 0) + pay;
+      notes.push(nameOf(players, uid) + " さん上乗せ → " + nb.top + "枚");
+    } else if (act.type === "fold") {
+      nb.folded[uid] = true;
+      notes.push(nameOf(players, uid) + " さんは降りました");
+    } else {
+      return null;
+    }
+    const r = raiseNext(nb, coins, idx + 1, notes, players);
+    if (r.parent) {
+      goPlay(upd, r.parent,
+        notes.join("\n") + "\n" + nameOf(players, r.parent) + " さんが親!(" + bids[r.parent] + "枚)");
+      return upd;
+    }
+    if (!Object.keys(nb.folded).length) delete nb.folded;
+    upd["game/bid"] = nb;
+    upd["game/turn"] = r.turn;
+    upd["game/notice"] = note(notes.join("\n"));
+    return upd;
+  }
+  return null;
+}
+
+// 一斉公開を約3秒見せてから、親を決める or 競り上げへ(ホストだけが呼ぶ)
+let bidTimer = null;
+export function checkBid(roomId, getRoom) {
+  if (bidTimer) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || g.phase !== "bid" || !g.bid || g.bid.stage !== "open") return;
+  const openId = g.bid.id;
+  bidTimer = setTimeout(async () => {
+    bidTimer = null;
+    const r = getRoom();
+    const gg = r && r.game;
+    if (!gg || gg.phase !== "bid" || !gg.bid || gg.bid.stage !== "open" || gg.bid.id !== openId) return;
+    const b = gg.bid;
+    const players = r.players || {};
+    const upd = {};
+    if (b.parent) {
+      goPlay(upd, b.parent, nameOf(players, b.parent) + " さんが親!\n" + nameOf(players, b.parent) + " さんから");
+    } else {
+      const coins = {};
+      gg.order.forEach((id) => {
+        coins[id] = (players[id] && players[id].coins) || 0;
+      });
+      const tied = b.tied || [];
+      if (!tied.some((id) => coins[id] >= 1)) {
+        // 同点の全員がコイン不足 → 抽選
+        const p = tied[Math.floor(Math.random() * tied.length)];
+        goPlay(upd, p, "同点の全員がコイン不足のため\n抽選で " + nameOf(players, p) + " さんが親!");
+      } else {
+        const nb = { stage: "raise", need: b.need, bids: b.bids, top: b.top, tied: tied.slice(), folded: {} };
+        const notes = [];
+        const res = raiseNext(nb, coins, 0, notes, players);
+        if (res.parent) {
+          goPlay(upd, res.parent, notes.join("\n") + "\n" + nameOf(players, res.parent) + " さんが親!");
+        } else {
+          if (!Object.keys(nb.folded).length) delete nb.folded;
+          upd["game/bid"] = nb;
+          upd["game/turn"] = res.turn;
+          upd["game/notice"] = note(
+            (notes.length ? notes.join("\n") + "\n" : "") +
+            "同点!競り上げ(" + b.top + "枚から)\n1枚ずつ上乗せ。降りた人の負け"
+          );
+        }
+      }
+    }
+    await update(ref(db, "rooms/" + roomId), upd);
+  }, 3000);
+}
+
 function applyAction(room, act) {
   const g = room.game;
-  if (!g || act.uid !== g.turn) return null;
+  if (!g) return null;
+  if (g.phase === "bid") return applyBid(room, act);
+  if (act.uid !== g.turn) return null;
   if (g.phase === "change") return applyChange(room, act);
   if (g.phase !== "play") return null;
   if (g.foul || g.clear) return null;
@@ -281,16 +467,35 @@ function applyAction(room, act) {
 
     let newLock = lockNow;
     const msgs = [];
-    if (!lockNow && act.lock && act.lock !== "none") {
+    if (act.lock && act.lock !== "none") {
       const ch = lockChoices(field, sc.suits, cards.length);
-      if (ch.includes(act.lock)) {
-        newLock = { mode: act.lock, suits: sc.suits };
-        msgs.push(act.lock === "both" ? "両しば!" : "しばり!");
+      const pair = cards.length === 2;
+      if (!lockNow && ch.includes(act.lock)) {
+        if (act.lock === "both") {
+          newLock = { mode: "both", suits: sc.suits, pair: true };
+          msgs.push("両しばり!");
+        } else if (!pair) {
+          newLock = { mode: "one", suits: sc.suits };
+          msgs.push("しばり!");
+        } else {
+          // 片しば: 前の札と同じマークのうち、1つだけ
+          const common = sc.suits.filter((s) => field.suits.includes(s));
+          const s = common.includes(act.lockSuit) ? act.lockSuit : common[0];
+          newLock = { mode: "one", suits: [s], pair: true };
+          msgs.push("片しば!");
+        }
+      } else if (
+        lockNow && !lockNow.gek && lockNow.mode === "one" && pair &&
+        act.lock === "both" && ch.includes("both")
+      ) {
+        // 片しばの場で、もう片方もしばる → 両しば
+        newLock = { mode: "both", suits: sc.suits, pair: true };
+        msgs.push("両しばり!");
       }
     }
     if (act.gek && newLock && !newLock.gek) {
-      if (gekCan(field, lockNow, sc.suits, j.str, cards.length, rev, lockNow ? lockNow.mode : act.lock)) {
-        newLock = { mode: newLock.mode, suits: newLock.suits, gek: true };
+      if (gekCan(field, lockNow, sc.suits, j.str, cards.length, rev, newLock.mode)) {
+        newLock = Object.assign({}, newLock, { gek: true });
         msgs.length = 0;
         msgs.push("激しばり!");
       }
@@ -301,6 +506,7 @@ function applyAction(room, act) {
     const jack = hasNum(cards, 11);
     const newRev = jack ? true : rev;
     const fieldObj = { cards, by: uid, count: cards.length, str: j.str, suits: sc.suits };
+    if (cards.length >= 2 && cards.some(isJoker) && act.jsuits) fieldObj.jsuits = act.jsuits;
 
     upd["hands/" + uid] = rest.length ? rest : null;
     upd["game/last"] = uid;
@@ -372,6 +578,7 @@ export function maybeCpu(roomId, getRoom) {
   const room = getRoom();
   const g = room && room.game;
   if (!g || room.actions || g.foul || g.clear) return;
+  if (g.phase === "bid") return maybeCpuBid(roomId, getRoom);
   if (g.phase !== "play" && g.phase !== "change") return;
   const p = room.players && room.players[g.turn];
   if (!p || !p.cpu) return;
@@ -396,6 +603,45 @@ export function maybeCpu(roomId, getRoom) {
     const a = cpuChoose(hand, gg.field || null, !!gg.rev, gg.lock || null);
     sendAction(roomId, turn, a);
   }, 1500);
+}
+
+// コンピューターの入札(伏せ入札は1人ずつ、競り上げは自分の番に)
+function maybeCpuBid(roomId, getRoom) {
+  const room = getRoom();
+  const g = room.game;
+  const b = g.bid;
+  if (!b) return;
+  let who = null;
+  if (b.stage === "blind") {
+    const bids = b.bids || {};
+    who = (b.need || []).find((id) => !bids[id] && room.players[id] && room.players[id].cpu) || null;
+  } else if (b.stage === "raise") {
+    const p = room.players[g.turn];
+    if (p && p.cpu) who = g.turn;
+  }
+  if (!who) return;
+  const stage = b.stage;
+  const top = b.top;
+  cpuTimer = setTimeout(() => {
+    cpuTimer = null;
+    const r = getRoom();
+    const gg = r && r.game;
+    if (!gg || gg.phase !== "bid" || !gg.bid || gg.bid.stage !== stage || r.actions) {
+      maybeCpu(roomId, getRoom);
+      return;
+    }
+    const hand = (r.hands && r.hands[who]) || [];
+    const coins = (r.players[who] && r.players[who].coins) || 0;
+    if (stage === "blind") {
+      if ((gg.bid.bids || {})[who]) return maybeCpu(roomId, getRoom);
+      const max = (r.settings && r.settings.bidMax) || 5;
+      sendAction(roomId, who, { type: "bid", n: cpuBid(hand, coins, max) });
+    } else {
+      if (gg.turn !== who || gg.bid.top !== top) return maybeCpu(roomId, getRoom);
+      const pay = gg.bid.top + 1 - ((gg.bid.bids || {})[who] || 0);
+      sendAction(roomId, who, { type: cpuRaise(hand, coins, pay) ? "raise" : "fold" });
+    }
+  }, stage === "blind" ? 800 : 1500);
 }
 
 let clearTimer = null;

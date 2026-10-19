@@ -4,7 +4,7 @@ import {
 } from "./firebase.js";
 import {
   startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks,
-  checkClear, settle, checkResultAcks, sendResultAck, backToLobby
+  checkClear, settle, checkResultAcks, sendResultAck, backToLobby, checkBid
 } from "./host.js";
 import { renderGame } from "./ui.js";
 
@@ -201,6 +201,7 @@ function render() {
       processActions(roomId, () => roomData);
       checkFoulAcks(roomId, () => roomData);
       checkClear(roomId, () => roomData);
+      checkBid(roomId, () => roomData);
       maybeCpu(roomId, () => roomData);
       settle(roomId, () => roomData);
       checkResultAcks(roomId, () => roomData);

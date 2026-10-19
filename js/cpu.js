@@ -1,5 +1,5 @@
 import {
-  findMoves, effStr, lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJoker
+  findMoves, effStr, lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJoker, judge
 } from "./rules.js";
 
 export function cpuChoose(hand, field, rev, lock) {
@@ -19,18 +19,52 @@ export function cpuChoose(hand, field, rev, lock) {
   }
   let lockMode = "none";
   let gek = false;
+  let lockSuit = null;
+  const ch = lockChoices(field, m.suits, m.cards.length);
   if (!lock) {
-    const ch = lockChoices(field, m.suits, m.cards.length);
     if (ch.length && Math.random() < 0.4) {
       lockMode = ch.includes("both") && Math.random() < 0.5 ? "both" : ch[0];
     }
+    if (lockMode === "one" && m.cards.length === 2) {
+      // 片しば: 前の札と同じマークから1つ選ぶ
+      const common = m.suits.filter((s) => field.suits.includes(s));
+      lockSuit = common[Math.floor(Math.random() * common.length)];
+    }
+  } else if (lock.mode === "one" && !lock.gek && m.cards.length === 2 && ch.includes("both")) {
+    // 片しばの場で、もう片方もしばる(両しばにする)
+    if (Math.random() < 0.5) lockMode = "both";
   }
-  const mode = lock ? lock.mode : lockMode;
+  const mode = lockMode === "both" ? "both" : lock ? lock.mode : lockMode;
   if (gekCan(field, lock, m.suits, m.str, m.cards.length, rev, mode) && Math.random() < 0.5) {
     gek = true;
     if (!lock && lockMode === "none") lockMode = "one";
   }
-  return { type: "play", cards: m.cards, jsuits: m.jsuits, lock: lockMode, gek };
+  return { type: "play", cards: m.cards, jsuits: m.jsuits, lock: lockMode, lockSuit, gek };
+}
+
+// ===== 親決めオークション =====
+
+// 3枚で一気に上がれる手か(親になれば即上がり)
+function instantWin(hand) {
+  if (hand.length !== 3) return false;
+  return judge(hand, null, false).ok && !isFoulFinish(hand, hand, false);
+}
+
+// ブラインド入札の枚数(1〜上限)
+export function cpuBid(hand, coins, max) {
+  const cap = Math.min(max, coins);
+  if (cap <= 1) return 1;
+  if (instantWin(hand)) return cap;
+  if (coins < 10) return 1;
+  const n = 1 + Math.floor(Math.random() * Math.min(3, cap));
+  return Math.min(n, cap);
+}
+
+// 競り上げで上乗せするか(pay = 今回払う枚数)
+export function cpuRaise(hand, coins, pay) {
+  if (coins < pay) return false;
+  if (instantWin(hand)) return true;
+  return pay <= 2 && coins - pay >= 8 && Math.random() < 0.5;
 }
 
 // カードチェンジ: 反則負けになりそうな札を替える。コインに余裕がなければパス

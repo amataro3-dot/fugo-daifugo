@@ -8,8 +8,11 @@ let lastNoteId = null;
 let winShownId = null;
 let winDone = null;
 let lastArgs = null;
+let bidPick = 1;
+let bidRound = null;
 
-export function cardEl(c, cls) {
+// jsuit: ジョーカーを何のマークとして出したか(場のカード用)
+export function cardEl(c, cls, jsuit) {
   const d = document.createElement("div");
   d.className = "card " + (cls || "");
   if (c === "back") {
@@ -19,6 +22,13 @@ export function cardEl(c, cls) {
   if (isJoker(c)) {
     d.classList.add("joker");
     d.textContent = "JOKER";
+    if (jsuit) {
+      const m = document.createElement("div");
+      m.textContent = "(" + SUIT_MARK[jsuit] + ")";
+      m.style.fontSize = "12px";
+      m.style.color = jsuit === "H" || jsuit === "D" ? "#d22" : "#222";
+      d.appendChild(m);
+    }
     return d;
   }
   const s = suitOf(c);
@@ -63,6 +73,20 @@ function seatEl(id, p, count, game, openHand, hand) {
       t.textContent = "チェンジ" + n + "回" + (fin ? "・終了" : "");
       d.appendChild(t);
     }
+  }
+  if (game.phase === "bid" && game.bid) {
+    const b = game.bid;
+    const bids = b.bids || {};
+    const inBid = (b.need || []).includes(id);
+    const t = document.createElement("div");
+    t.className = "small";
+    if (!inBid) t.textContent = "パス(0枚)";
+    else if (b.stage === "blind") t.textContent = bids[id] ? "入札済み" : "考え中…";
+    else {
+      t.textContent = "入札 " + bids[id] + "枚" + (b.folded && b.folded[id] ? "・降りた" : "");
+      t.style.color = "#f2c230";
+    }
+    d.appendChild(t);
   }
   if (game.out && game.out[id]) {
     const fm = document.createElement("div");
@@ -148,11 +172,15 @@ function showResult(g, players, onAction) {
   if (r.gain > 0) add("ポット " + r.gain + " 枚を獲得", "rs");
   else if (r.carry > 0) add("ポット " + r.carry + " 枚は次のラウンドへ持ち越し", "rs");
   else add("ポットは 0 枚", "rs");
-  (g.order || []).forEach((id) => {
-    const p = players[id];
-    if (!p) return;
-    let line = p.name + "  🪙" + p.coins;
-    if (r.winner === id && r.gain > 0) line += "  (+" + r.gain + ")";
+  // コインが多い人の順に並べる(同じ枚数は同じ順位)
+  const rows = (g.order || [])
+    .filter((id) => players[id])
+    .map((id) => ({ id, p: players[id], c: players[id].coins || 0 }))
+    .sort((a, b) => b.c - a.c);
+  rows.forEach((x, i) => {
+    x.rank = i > 0 && x.c === rows[i - 1].c ? rows[i - 1].rank : i + 1;
+    let line = x.rank + "位  " + x.p.name + "  🪙" + x.c;
+    if (r.winner === x.id && r.gain > 0) line += "  (+" + r.gain + ")";
     add(line, "rs");
   });
   if (r.outIds && r.outIds.length) {
@@ -169,6 +197,140 @@ function showResult(g, players, onAction) {
   };
   ov.appendChild(b);
   document.body.appendChild(ov);
+}
+
+// 親決めオークション中の、場の表示
+function bidFieldEl(field, b, players) {
+  const line = (text, color, size) => {
+    const d = document.createElement("div");
+    d.textContent = text;
+    if (color) d.style.color = color;
+    if (size) d.style.fontSize = size;
+    field.appendChild(d);
+  };
+  const nm = (id) => (players[id] ? players[id].name : "");
+  const bids = b.bids || {};
+  if (b.stage === "blind") {
+    line("親決めオークション", "#ffd84a", "14px");
+    const n = (b.need || []).filter((id) => bids[id]).length;
+    line("入札 " + n + " / " + (b.need || []).length + " 人");
+    return;
+  }
+  if (b.stage === "open") {
+    line("一斉公開!", "#ffd84a", "14px");
+    (b.need || []).slice().sort((x, y) => bids[y] - bids[x]).forEach((id) => {
+      line(nm(id) + "  " + bids[id] + "枚", bids[id] === b.top ? "#fff" : null);
+    });
+    if (b.parent) line("→ " + nm(b.parent) + " さんが親!", "#ffd84a");
+    else line("→ 同点!競り上げへ", "#ffd84a");
+    return;
+  }
+  line("競り上げ中(" + b.top + "枚)", "#ffd84a", "14px");
+  (b.tied || []).forEach((id) => {
+    const out = b.folded && b.folded[id];
+    line(nm(id) + "  " + bids[id] + "枚" + (out ? "(降りた)" : ""), out ? "#999" : "#fff");
+  });
+}
+
+// 親決めオークション中の、自分の操作エリア
+function bidControls(root, g, me, uid, maxBid, onAction) {
+  const b = g.bid;
+  const bids = b.bids || {};
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  msg.style.color = "#fff";
+  root.appendChild(msg);
+  const inBid = (b.need || []).includes(uid);
+  if (!inBid) {
+    msg.textContent = "コインが0枚なので、今回の親決めはパスです";
+    return;
+  }
+  if (b.stage === "blind") {
+    if (bids[uid]) {
+      msg.textContent = "入札済み(" + bids[uid] + "枚)。全員の入札を待っています";
+      return;
+    }
+    const cap = Math.min(maxBid, me.coins || 0);
+    if (bidRound !== g.round) {
+      bidRound = g.round;
+      bidPick = 1;
+    }
+    bidPick = Math.max(1, Math.min(cap, bidPick));
+    msg.textContent = "賭ける枚数を選んでください(1〜" + cap + "枚)\n単独で最高額なら親(最初に出す人)。出したコインはポットへ";
+    msg.style.whiteSpace = "pre-line";
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;justify-content:center;gap:18px;margin:6px 0";
+    const step = (t, d) => {
+      const s = document.createElement("button");
+      s.className = "btn";
+      s.textContent = t;
+      s.style.cssText = "width:56px;margin:0;padding:8px";
+      s.disabled = d;
+      return s;
+    };
+    const minus = step("−", bidPick <= 1);
+    const num = document.createElement("div");
+    num.textContent = bidPick + "枚";
+    num.style.cssText = "font-size:28px;font-weight:bold;min-width:70px;text-align:center;color:#f2c230";
+    const plus = step("+", bidPick >= cap);
+    const redraw = () => {
+      num.textContent = bidPick + "枚";
+      minus.disabled = bidPick <= 1;
+      plus.disabled = bidPick >= cap;
+      go.textContent = "入札する(" + bidPick + "枚)";
+    };
+    minus.onclick = () => { bidPick = Math.max(1, bidPick - 1); redraw(); };
+    plus.onclick = () => { bidPick = Math.min(cap, bidPick + 1); redraw(); };
+    row.appendChild(minus);
+    row.appendChild(num);
+    row.appendChild(plus);
+    root.appendChild(row);
+    const go = document.createElement("button");
+    go.className = "btn main";
+    go.textContent = "入札する(" + bidPick + "枚)";
+    go.onclick = () => {
+      go.disabled = true;
+      onAction({ type: "bid", n: bidPick });
+    };
+    root.appendChild(go);
+    return;
+  }
+  if (b.stage === "open") {
+    msg.textContent = "結果発表中…";
+    return;
+  }
+  // 競り上げ
+  if (!(b.tied || []).includes(uid) || (b.folded && b.folded[uid])) {
+    msg.textContent = "同点の人が競り上げ中です";
+    return;
+  }
+  if (g.turn !== uid) {
+    msg.textContent = "相手の番です(今 " + b.top + "枚)";
+    return;
+  }
+  const pay = b.top + 1 - (bids[uid] || 0);
+  const can = (me.coins || 0) >= pay;
+  msg.textContent = "上乗せすると合計 " + (b.top + 1) + "枚(今回 " + pay + "枚払う)";
+  const btns = document.createElement("div");
+  btns.className = "g-btns";
+  const up = document.createElement("button");
+  up.className = "btn main";
+  up.textContent = "上乗せ(+" + pay + "枚)";
+  up.disabled = !can;
+  up.onclick = () => {
+    up.disabled = true;
+    onAction({ type: "raise" });
+  };
+  const fold = document.createElement("button");
+  fold.className = "btn";
+  fold.textContent = "降りる";
+  fold.onclick = () => {
+    fold.disabled = true;
+    onAction({ type: "fold" });
+  };
+  btns.appendChild(up);
+  btns.appendChild(fold);
+  root.appendChild(btns);
 }
 
 export function renderGame(root, room, uid, onLeave, onAction) {
@@ -190,7 +352,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     renderFinal(root, g, onAction);
     return;
   }
-  if (g.phase === "play" || g.phase === "change") {
+  if (g.phase === "play" || g.phase === "change" || g.phase === "bid") {
     winShownId = null;
     winDone = null;
   }
@@ -278,7 +440,10 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     lk.className = "revmark";
     const names = g.lock.suits.map((s) => SUIT_MARK[s]).join("");
     lk.textContent =
-      (g.lock.gek ? "激しばり " : g.lock.mode === "both" ? "両しばり " : "しばり ") + names;
+      (g.lock.gek ? "激しばり "
+        : g.lock.mode === "both" ? "両しばり "
+        : g.lock.pair ? "片しば "
+        : "しばり ") + names;
     field.appendChild(lk);
   }
   if (g.rev) {
@@ -295,8 +460,11 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   } else if (g.field) {
     const row = document.createElement("div");
     row.className = "hand";
-    g.field.cards.forEach((c) => row.appendChild(cardEl(c, "small")));
+    const js = g.field.jsuits || {};
+    g.field.cards.forEach((c) => row.appendChild(cardEl(c, "small", js[c])));
     field.appendChild(row);
+  } else if (g.phase === "bid" && g.bid) {
+    bidFieldEl(field, g.bid, players);
   } else if (g.phase === "change") {
     field.textContent = "カードチェンジ中";
   } else {
@@ -338,7 +506,8 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   }
 
   const inChange = g.phase === "change";
-  const myTurn = (g.phase === "play" || inChange) && g.turn === uid;
+  const inBid = g.phase === "bid" && !!g.bid;
+  const myTurn = (g.phase === "play" || inChange || inBid) && g.turn === uid;
   const info = document.createElement("div");
   info.className = "me-box";
   info.textContent =
@@ -360,6 +529,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     const el = cardEl(c);
     if (selected.includes(c)) el.classList.add("sel");
     el.onclick = () => {
+      if (inBid) return;
       if (selected.includes(c)) {
         selected = selected.filter((x) => x !== c);
       } else if (inChange) {
@@ -372,6 +542,11 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     hd.appendChild(el);
   });
   root.appendChild(hd);
+
+  if (inBid) {
+    bidControls(root, g, me, uid, (room.settings && room.settings.bidMax) || 5, onAction);
+    return;
+  }
 
   const msg = document.createElement("div");
   msg.className = "msg";
@@ -473,6 +648,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
       if (okk !== "yes") return;
     }
     let lock = "none";
+    let lockSuit = null;
     let gek = false;
     const canGek = (mode) =>
       gekCan(g.field || null, g.lock || null, sc.suits, j.str, cards.length, !!g.rev, mode);
@@ -480,8 +656,19 @@ export function renderGame(root, room, uid, onLeave, onAction) {
       { label: "発動する", value: "yes" },
       { label: "しない", value: "no" }
     ];
-    if (!g.lock) {
-      const ch = lockChoices(g.field || null, sc.suits, cards.length);
+    const ch = lockChoices(g.field || null, sc.suits, cards.length);
+    if (g.lock && g.lock.mode === "one" && !g.lock.gek && cards.length === 2 && ch.includes("both")) {
+      // 片しばの場で、もう片方のマークも前の札と同じ → 両しばにできる
+      const other = sc.suits.filter((s) => !g.lock.suits.includes(s)).map((s) => SUIT_MARK[s]).join("");
+      const up = await askChoice("もう片方(" + other + ")もしばりますか?", [
+        { label: "しばる(両しばり)", value: "both" },
+        { label: "しばらない", value: "none" }
+      ]);
+      if (up === "both") {
+        lock = "both";
+        if (canGek("both")) gek = (await askChoice("激しばりしますか?", yesNo)) === "yes";
+      }
+    } else if (!g.lock) {
       if (ch.length) {
         const opts = [];
         if (cards.length === 1) {
@@ -499,6 +686,14 @@ export function renderGame(root, room, uid, onLeave, onAction) {
         } else {
           lock = ans;
         }
+        if (cards.length === 2 && lock === "one") {
+          // 片しば: 前の札と同じマークから1つ選ぶ(1つしかなければ自動)
+          const common = sc.suits.filter((s) => g.field.suits.includes(s));
+          lockSuit = common.length === 1 ? common[0] : await askChoice(
+            "どのマークでしばりますか?",
+            common.map((s) => ({ label: SUIT_MARK[s], value: s }))
+          );
+        }
         if (cards.length === 2 && lock === "both" && canGek("both")) {
           gek = (await askChoice("激しばりしますか?", yesNo)) === "yes";
         }
@@ -507,7 +702,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
       gek = (await askChoice("激しばりしますか?", yesNo)) === "yes";
     }
     selected = [];
-    onAction({ type: "play", cards, jsuits: jokers.length ? jsuits : null, lock, gek });
+    onAction({ type: "play", cards, jsuits: jokers.length ? jsuits : null, lock, lockSuit, gek });
   };
   const passBtn = document.createElement("button");
   passBtn.className = "btn";
