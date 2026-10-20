@@ -3,7 +3,9 @@ import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
   canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
 } from "./rules.js";
-import { cpuChoose, cpuChange, cpuBid, cpuRaise, cpuSeatBid, cpuBorrowRaise } from "./cpu.js";
+import {
+  cpuChoose, cpuChange, cpuBid, cpuRaise, cpuSeatBid, cpuBorrowRaise, cpuMarketBet, cpuMarketSwap
+} from "./cpu.js";
 
 function draw(state, n) {
   const out = [];
@@ -28,9 +30,19 @@ const GOD_FORCE_PARENT = "全員が神の手を借りてしまったため、\n�
 const GOD_FORCE_SEAT = "全員が神の手を借りてしまいましたので、\n最後に神に助けを求めた人から\n決めてください。";
 
 // 神の手を借りられるか(借金ルールあり、かつ、このゲームでまだ使っていない)
-function canBorrow(room, id) {
+// upd を渡すと、同じ書き込みの中で借りたばかりの人も「使用済み」として扱う
+function canBorrow(room, id, upd) {
   const p = (room.players || {})[id];
+  if (upd && (upd["players/" + id + "/debtTotal"] || 0) > 0) return false;
   return !!(room.settings && room.settings.debt === "on" && p && !((p.debtTotal || 0) > 0));
+}
+
+// 今のコイン(同じ書き込みの中で変わっていれば、そちらを使う)
+function coinsOf(room, upd, id) {
+  const k = "players/" + id + "/coins";
+  if (upd && upd[k] !== undefined) return upd[k];
+  const p = (room.players || {})[id];
+  return (p && p.coins) || 0;
 }
 
 // コインを払う。手持ちで足りない分は借金にする(コインはマイナスになる)。借りた枚数を返す
@@ -64,20 +76,20 @@ export async function startGame(roomId, roomData) {
   for (let i = playing.length; i < limit; i++) cpus.push("cpu" + (i + 1));
 
   const seatOrder = shuffle(playing.concat(cpus));
-  const state = { deck: shuffle(makeLot()), lot: 1, notice: "" };
   const updates = {};
+  const allPlayers = Object.assign({}, players);
 
   seatOrder.forEach((id, i) => {
     const isCpu = id.startsWith("cpu");
-    const hand = draw(state, 3);
-    updates["hands/" + id] = hand;
     if (isCpu) {
       updates["players/" + id] = {
         name: "CPU" + (i + 1), cpu: true, coins: settings.coins,
         debt: 0, debtTotal: 0, seat: i, ready: true,
         joinedAt: Date.now() + i, spectator: false, online: true
       };
+      allPlayers[id] = updates["players/" + id];
     } else {
+      allPlayers[id] = Object.assign({}, players[id], { coins: settings.coins, debt: 0, debtTotal: 0 });
       updates["players/" + id + "/coins"] = settings.coins;
       updates["players/" + id + "/debt"] = 0;
       updates["players/" + id + "/debtTotal"] = 0;
@@ -88,12 +100,10 @@ export async function startGame(roomId, roomData) {
     updates["players/" + id + "/spectator"] = true;
   });
 
-  updates["deck"] = state.deck;
-  updates["lot"] = state.lot;
-  // 配札のあとは、カードチェンジから(1ラウンド目は席順の先頭=ランダム)
-  updates["game"] = {
-    round: 1, phase: "change", pot: 0, order: seatOrder, turn: seatOrder[0], rev: false
-  };
+  // 配札 → カードマーケット(1ラウンド目の親はランダム)
+  const roomLike = { settings, players: allPlayers, deck: shuffle(makeLot()), lot: 1 };
+  const lead = seatOrder[Math.floor(Math.random() * seatOrder.length)];
+  dealAndMarket(updates, roomLike, seatOrder, lead, 1, 0, "", null);
   updates["meta/started"] = true;
 
   await update(ref(db, "rooms/" + roomId), updates);
@@ -110,6 +120,7 @@ export function sendAction(roomId, uid, act) {
     lockSuit: act.lockSuit || null,
     gek: !!act.gek,
     n: act.n || 0,
+    c: typeof act.c === "number" ? act.c : -1,
     borrow: !!act.borrow
   });
 }
@@ -191,7 +202,7 @@ function applyChange(room, act) {
   } else {
     // チェンジ終了 → 親決めのブラインドオークションへ
     upd["game/change"] = null;
-    startBid(upd, order, coinsNow, players, lotNote);
+    startBid(pathSetter(upd), room, upd, order, lotNote, g.lead);
   }
   return upd;
 }
@@ -212,28 +223,62 @@ function nameOf(players, id) {
   return (players[id] && players[id].name) || "";
 }
 
-// 対戦スタート(親が決まった)
-function goPlay(upd, parent, text) {
-  upd["game/phase"] = "play";
-  upd["game/turn"] = parent;
-  upd["game/parent"] = parent; // 次のラウンドの席決めで使う(前回の親)
-  upd["game/bid"] = null;
-  upd["game/notice"] = note(text);
+// game の書き方を2通り用意する(「game/〜」の書き込み / game を丸ごと作るとき)
+function pathSetter(upd) {
+  return (k, v) => {
+    upd["game/" + k] = v;
+  };
+}
+function objSetter(G) {
+  return (k, v) => {
+    if (v === null || v === undefined) delete G[k];
+    else G[k] = v;
+  };
 }
 
-// チェンジのあとに呼ぶ。コインがある人だけ入札する
-function startBid(upd, order, coinsNow, players, lotNote) {
+// 対戦スタート(親が決まった)
+function goPlayS(setG, parent, text) {
+  setG("phase", "play");
+  setG("turn", parent);
+  setG("parent", parent); // 次のラウンドの席決めで使う(前回の親)
+  setG("bid", null);
+  setG("notice", note(text));
+}
+function goPlay(upd, parent, text) {
+  goPlayS(pathSetter(upd), parent, text);
+}
+
+// チェンジのあとに呼ぶ。コインがある人と、神の手を借りられる人が入札する
+function startBid(setG, room, upd, order, lotNote, lead) {
+  const players = room.players || {};
   const head = lotNote ? lotNote + "\n" : "";
-  const need = order.filter((id) => (coinsNow[id] || 0) >= 1);
+  const need = order.filter((id) => coinsOf(room, upd, id) >= 1 || canBorrow(room, id, upd));
   if (need.length === 0) {
-    const p = order[0];
-    goPlay(upd, p, head + "コインを持っている人がいないため\n" + nameOf(players, p) + " さんから");
+    const p = lead || order[0];
+    goPlayS(setG, p, head + "入札できる人がいないため\n" + nameOf(players, p) + " さんから");
     return;
   }
-  upd["game/phase"] = "bid";
-  upd["game/turn"] = null;
-  upd["game/bid"] = { stage: "blind", need };
-  upd["game/notice"] = note(head + "親決めオークション!\n賭ける枚数を選んでください");
+  setG("phase", "bid");
+  setG("turn", null);
+  setG("bid", { stage: "blind", need });
+  setG("notice", note(head + "親決めオークション!\n賭ける枚数を選んでください"));
+}
+
+// ブラインドで、同点の全員が借金していたときの親
+// 1. 借りた枚数が一番少ない人 2. 同じなら前ラウンドの勝者 3. いなければ勝者から時計回りで近い人
+function forcedParent(g, tied, borrowed) {
+  const min = Math.min(...tied.map((id) => borrowed[id] || 0));
+  const cand = tied.filter((id) => (borrowed[id] || 0) === min);
+  if (cand.length === 1) return cand[0];
+  const order = g.order || [];
+  const lead = g.lead;
+  if (cand.includes(lead)) return lead;
+  const li = order.indexOf(lead);
+  for (let k = 1; k <= order.length; k++) {
+    const id = order[(Math.max(li, 0) + k) % order.length];
+    if (cand.includes(id)) return id;
+  }
+  return cand[0];
 }
 
 // 競り上げで、次に聞く人をさがす(コインが足りない人は自動で降りる)
@@ -273,29 +318,56 @@ function applyBid(room, act) {
 
   // --- 伏せて入札 ---
   if (b.stage === "blind") {
-    if (act.type !== "bid") return null;
-    if (!need.includes(uid) || bids[uid]) return null;
-    const n = Math.floor(Number(act.n) || 0);
-    if (n < 1 || n > Math.min(max, coins[uid])) return null;
+    if (act.type !== "bid" && act.type !== "bpass") return null;
+    if (!need.includes(uid) || bids[uid] !== undefined) return null;
+    let n = 0;
+    if (act.type === "bid") {
+      n = Math.floor(Number(act.n) || 0);
+      // 手持ちより多いときは、神の手を借りる(このゲームでまだ使っていない人だけ)
+      const cap = act.borrow && canBorrow(room, uid) ? max : Math.min(max, coins[uid]);
+      if (n < 1 || n > cap) return null;
+    } else if (coins[uid] >= 1) {
+      return null; // パスできるのは、コインがなくて神の手を借りなかった人だけ
+    }
     bids[uid] = n;
-    if (!need.every((id) => bids[id])) {
+    if (!need.every((id) => bids[id] !== undefined)) {
       upd["game/bid/bids/" + uid] = n;
       return upd;
     }
-    // 全員そろった → 一斉公開。コインをポットへ
+    // 全員そろった → 一斉公開。コインをポットへ(足りない分は借金)
     let sum = 0;
+    const debtors = {};
+    const borrowed = {};
+    const god = [];
     need.forEach((id) => {
+      if (!(bids[id] > 0)) return;
       sum += bids[id];
-      upd["players/" + id + "/coins"] = coins[id] - bids[id];
+      const bw = payCoins(upd, room, id, coins, bids[id]);
+      if (bw > 0) {
+        debtors[id] = true;
+        borrowed[id] = bw;
+        god.push(nameOf(players, id));
+      }
     });
     upd["game/pot"] = (g.pot || 0) + sum;
-    const top = Math.max(...need.map((id) => bids[id]));
-    const tops = need.filter((id) => bids[id] === top);
-    const nb = { stage: "open", need, bids, top, id: Date.now() };
-    if (tops.length === 1) nb.parent = tops[0];
-    else nb.tied = tops;
+    const bidders = need.filter((id) => bids[id] > 0);
+    const nb = { stage: "open", need, bids, id: Date.now() };
+    if (bidders.length === 0) {
+      nb.top = 0;
+      nb.parent = g.lead || need[0];
+    } else {
+      const top = Math.max(...bidders.map((id) => bids[id]));
+      const tops = bidders.filter((id) => bids[id] === top);
+      nb.top = top;
+      if (tops.length === 1) nb.parent = tops[0];
+      else nb.tied = tops;
+    }
+    if (Object.keys(debtors).length) {
+      nb.debtors = debtors;
+      nb.borrowed = borrowed;
+    }
     upd["game/bid"] = nb;
-    upd["game/notice"] = note("一斉公開!");
+    upd["game/notice"] = note("一斉公開!" + (god.length ? "\n" + god.join("・") + " さんが神の手を借りました" : ""));
     return upd;
   }
 
@@ -368,8 +440,14 @@ export function checkBid(roomId, getRoom) {
     const b = gg.bid;
     const players = r.players || {};
     const upd = {};
+    const tiedAll = b.tied || [];
     if (b.parent) {
-      goPlay(upd, b.parent, nameOf(players, b.parent) + " さんが親!\n" + nameOf(players, b.parent) + " さんから");
+      const why = b.top > 0 ? "" : "誰も入札しなかったため\n";
+      goPlay(upd, b.parent, why + nameOf(players, b.parent) + " さんが親!\n" + nameOf(players, b.parent) + " さんから");
+    } else if (tiedAll.length && tiedAll.every((id) => b.debtors && b.debtors[id])) {
+      // 同点の全員がブラインドで借金 → 強制終了
+      const p = forcedParent(gg, tiedAll, b.borrowed || {});
+      goPlay(upd, p, GOD_FORCE_PARENT + "\n" + nameOf(players, p) + " さんが親!");
     } else {
       const coins = {};
       gg.order.forEach((id) => {
@@ -377,18 +455,20 @@ export function checkBid(roomId, getRoom) {
       });
       const tied = b.tied || [];
       const canB = (id) => canBorrow(r, id);
-      if (!tied.some((id) => coins[id] >= 1 || canB(id))) {
+      const dbt = b.debtors || {};
+      if (!tied.some((id) => coins[id] >= 1 || canB(id) || dbt[id])) {
         // 同点の全員がコイン不足 → 抽選
         const p = tied[Math.floor(Math.random() * tied.length)];
         goPlay(upd, p, "同点の全員がコイン不足のため\n抽選で " + nameOf(players, p) + " さんが親!");
       } else {
-        const nb = { stage: "raise", need: b.need, bids: b.bids, top: b.top, tied: tied.slice(), folded: {} };
+        const nb = { stage: "raise", need: b.need, bids: b.bids, top: b.top, tied: tied.slice(), folded: {}, debtors: Object.assign({}, dbt) };
         const notes = [];
         const res = raiseNext(nb, coins, 0, notes, players, canB);
         if (res.parent) {
           goPlay(upd, res.parent, notes.join("\n") + "\n" + nameOf(players, res.parent) + " さんが親!");
         } else {
           if (!Object.keys(nb.folded).length) delete nb.folded;
+          if (!Object.keys(nb.debtors).length) delete nb.debtors;
           upd["game/bid"] = nb;
           upd["game/turn"] = res.turn;
           upd["game/notice"] = note(
@@ -407,6 +487,7 @@ function applyAction(room, act) {
   if (!g) return null;
   if (g.phase === "bid") return applyBid(room, act);
   if (g.phase === "seat") return applySeat(room, act);
+  if (g.phase === "market") return applyMarket(room, act);
   if (act.uid !== g.turn) return null;
   if (g.phase === "change") return applyChange(room, act);
   if (g.phase !== "play") return null;
@@ -628,6 +709,7 @@ export function maybeCpu(roomId, getRoom) {
   if (!g || room.actions || g.foul || g.clear) return;
   if (g.phase === "bid") return maybeCpuBid(roomId, getRoom);
   if (g.phase === "seat") return maybeCpuSeat(roomId, getRoom);
+  if (g.phase === "market") return maybeCpuMarket(roomId, getRoom);
   if (g.phase !== "play" && g.phase !== "change") return;
   const p = room.players && room.players[g.turn];
   if (!p || !p.cpu) return;
@@ -663,7 +745,7 @@ function maybeCpuBid(roomId, getRoom) {
   let who = null;
   if (b.stage === "blind") {
     const bids = b.bids || {};
-    who = (b.need || []).find((id) => !bids[id] && room.players[id] && room.players[id].cpu) || null;
+    who = (b.need || []).find((id) => bids[id] === undefined && room.players[id] && room.players[id].cpu) || null;
   } else if (b.stage === "raise") {
     const p = room.players[g.turn];
     if (p && p.cpu) who = g.turn;
@@ -682,9 +764,15 @@ function maybeCpuBid(roomId, getRoom) {
     const hand = (r.hands && r.hands[who]) || [];
     const coins = (r.players[who] && r.players[who].coins) || 0;
     if (stage === "blind") {
-      if ((gg.bid.bids || {})[who]) return maybeCpu(roomId, getRoom);
+      if ((gg.bid.bids || {})[who] !== undefined) return maybeCpu(roomId, getRoom);
       const max = (r.settings && r.settings.bidMax) || 5;
-      sendAction(roomId, who, { type: "bid", n: cpuBid(hand, coins, max) });
+      if (coins < 1) {
+        // コインなし: 親になれば即上がりのときだけ、神の手を借りて入札
+        if (canBorrow(r, who) && cpuBorrowRaise(hand)) sendAction(roomId, who, { type: "bid", n: max, borrow: true });
+        else sendAction(roomId, who, { type: "bpass" });
+      } else {
+        sendAction(roomId, who, { type: "bid", n: cpuBid(hand, coins, max) });
+      }
     } else {
       if (gg.turn !== who || gg.bid.top !== top) return maybeCpu(roomId, getRoom);
       const pay = gg.bid.top + 1 - ((gg.bid.bids || {})[who] || 0);
@@ -735,6 +823,48 @@ function maybeCpuSeat(roomId, getRoom) {
     } else {
       const empty = (ss.seats || []).map((x, i) => (x ? -1 : i)).filter((i) => i >= 0);
       sendAction(roomId, who, { type: "pick", n: empty[Math.floor(Math.random() * empty.length)] });
+    }
+  }, stage === "blind" ? 800 : 1500);
+}
+
+// コンピューターのマーケット(ベット・競り合い・交換)
+function maybeCpuMarket(roomId, getRoom) {
+  const room = getRoom();
+  const g = room.game;
+  const m = g.market;
+  if (!m) return;
+  const isCpu = (id) => room.players[id] && room.players[id].cpu;
+  let who = null;
+  if (m.stage === "blind") {
+    const bets = m.bets || {};
+    who = (m.need || []).find((id) => bets[id] === undefined && isCpu(id)) || null;
+  } else if ((m.stage === "raise" || m.stage === "swap") && isCpu(g.turn)) {
+    who = g.turn;
+  }
+  if (!who) return;
+  const stage = m.stage;
+  const key = JSON.stringify(m) + g.turn;
+  cpuTimer = setTimeout(() => {
+    cpuTimer = null;
+    const r = getRoom();
+    const gg = r && r.game;
+    if (!gg || gg.phase !== "market" || !gg.market || r.actions || JSON.stringify(gg.market) + gg.turn !== key) {
+      maybeCpu(roomId, getRoom);
+      return;
+    }
+    const mm = gg.market;
+    const hand = (r.hands && r.hands[who]) || [];
+    const coins = (r.players[who] && r.players[who].coins) || 0;
+    if (stage === "blind") {
+      const avail = (mm.avail || []).filter((c) => !(mm.sold && mm.sold["c" + c]));
+      sendAction(roomId, who, cpuMarketBet(hand, mm.cards || [], avail, coins));
+    } else if (stage === "raise") {
+      const R = mm.raise;
+      const pay = R.top + 1 - ((R.bids || {})[who] || 0);
+      sendAction(roomId, who, { type: coins >= pay && cpuRaise(hand, coins, pay) ? "raise" : "fold" });
+    } else {
+      const a = (mm.awards || [])[0];
+      sendAction(roomId, who, { type: "mswap", cards: [cpuMarketSwap(hand, mm.cards[a.c])] });
     }
   }, stage === "blind" ? 800 : 1500);
 }
@@ -919,26 +1049,372 @@ async function nextRound(roomId, room) {
   let newOrder = remaining.slice();
   const wi = g.result && g.result.winner ? newOrder.indexOf(g.result.winner) : -1;
   if (wi > 0) newOrder = newOrder.slice(wi).concat(newOrder.slice(0, wi));
-  dealAndChange(upd, room, newOrder, newOrder[0], rr + 1, g.pot || 0, "");
+  const w2 = g.result && g.result.winner && newOrder.includes(g.result.winner) ? g.result.winner : null;
+  dealAndMarket(upd, room, newOrder, w2 || newOrder[Math.floor(Math.random() * newOrder.length)],
+    rr + 1, g.pot || 0, "", w2);
   await update(ref(db, "rooms/" + roomId), upd);
 }
 
-// 3枚ずつ配って、カードチェンジを始める
-function dealAndChange(upd, room, order, firstTurn, round, pot, text) {
+// 3枚ずつ配って、カードマーケットを始める
+// lead: マーケットの親(前ラウンドの勝者。いなければランダム) / prevWinner: 前ラウンドの勝者
+function dealAndMarket(upd, room, order, lead, round, pot, text, prevWinner) {
   // game を丸ごと書き直すので、game/〜 の書き込みは消しておく(同時に書くとエラーになるため)
   Object.keys(upd).forEach((k) => {
     if (k.startsWith("game/")) delete upd[k];
   });
+  const players = room.players || {};
   const state = { deck: (room.deck || []).slice(), lot: room.lot || 1, notice: "" };
   order.forEach((id) => {
     upd["hands/" + id] = draw(state, 3);
   });
+  const cards = draw(state, 3);
   upd["deck"] = state.deck.length ? state.deck : null;
   upd["lot"] = state.lot;
-  const game = { round, phase: "change", pot, order, turn: firstTurn, rev: false };
-  const msg = [text, state.notice].filter(Boolean).join("\n");
-  if (msg) game.notice = note(msg);
-  upd["game"] = game;
+  const G = { round, phase: "market", pot, order, lead, rev: false };
+  if (prevWinner) G.prevWinner = prevWinner;
+  const leadLine = "親: " + nameOf(players, lead) + " さん" + (
+    prevWinner ? "(前ラウンドの勝者)"
+      : round === 1 ? "\nランダム(スタート時は勝者がいないためランダムで決めます)"
+      : "\nランダム(前ラウンドの勝者がいないためランダムで決めます)"
+  );
+  const head = [text, state.notice].filter(Boolean).join("\n");
+  const need = marketNeed(room, upd, order, lead, {});
+  if (!need.length) {
+    goChangeG(G, room, upd, [head, "ベットできる人がいないため、マーケットはなし"].filter(Boolean).join("\n"));
+  } else {
+    G.market = { stage: "blind", lap: 1, cards, avail: [0, 1, 2], need };
+    G.notice = note([head, "カードマーケット!", leadLine, "カードを1枚選んでベット(1〜5枚)かパス"].filter(Boolean).join("\n"));
+  }
+  upd["game"] = clone(G);
+}
+
+function clone(o) {
+  return JSON.parse(JSON.stringify(o));
+}
+
+// カードチェンジへ(親から。チェンジできる人がいなければ、親決めへ)
+function goChangeG(G, room, upd, head) {
+  const order = G.order;
+  const coins = {};
+  order.forEach((id) => {
+    coins[id] = coinsOf(room, upd, id);
+  });
+  delete G.market;
+  const li = Math.max(order.indexOf(G.lead), 0);
+  const first = pickChanger(order, li - 1, {}, {}, coins, (id) => canBorrow(room, id, upd));
+  if (first) {
+    G.phase = "change";
+    G.turn = first;
+    G.notice = note([head, "カードチェンジ(" + nameOf(room.players || {}, first) + " さんから)"].filter(Boolean).join("\n"));
+  } else {
+    startBid(objSetter(G), room, upd, order, head, G.lead);
+  }
+}
+
+// ===== カードマーケット =====
+//
+// game/market の中身
+//   stage: "blind"(伏せてベット) / "open"(一斉公開) / "raise"(同点の競り合い) / "swap"(手札と交換)
+//   lap:   1 or 2(2周目は、1周目で誰も賭けなかったカードだけ)
+//   cards: 場に出した3枚 / avail: この周でベットできるカード(番号)
+//   need:  ベットかパスを選ぶ人(親から時計回り)
+//   bets:  {人: {c: カード番号(-1はパス), n: 枚数}}
+//   sold:  {c0: 人} 手に入れた人
+//   ties:  {c0: [同点の人]} / queue: 競り合いをするカードの順
+//   raise: 競り合い中 {c, tied, folded, foldOrder, top, bids}
+//   awards: 交換待ち [{c, w}] / debtors: このマーケットで神の手を借りた人
+
+const MK_MAX = 5;
+const CIRCLE = ["①", "②", "③"];
+
+function normMarket(m) {
+  const o = clone(m || {});
+  o.cards = o.cards || [];
+  o.avail = o.avail || [];
+  o.need = o.need || [];
+  o.bets = o.bets || {};
+  o.sold = o.sold || {};
+  o.ties = o.ties || {};
+  o.queue = o.queue || [];
+  o.awards = o.awards || [];
+  o.debtors = o.debtors || {};
+  if (o.raise) {
+    o.raise.folded = o.raise.folded || {};
+    o.raise.foldOrder = o.raise.foldOrder || [];
+    o.raise.bids = o.raise.bids || {};
+  }
+  return o;
+}
+
+// 親から時計回りで、ベットできる人(コイン1枚以上 or 神の手を借りられる)
+function marketNeed(room, upd, order, lead, debtors) {
+  const li = Math.max(order.indexOf(lead), 0);
+  const rot = order.slice(li).concat(order.slice(0, li));
+  return rot.filter((id) => coinsOf(room, upd, id) >= 1 || (canBorrow(room, id, upd) && !debtors[id]));
+}
+
+function cardName(c) {
+  if (!c) return "";
+  if (c.startsWith("JK")) return "JOKER";
+  const m = { S: "♠", H: "♥", D: "♦", C: "♣" }[c[0]];
+  const n = Number(c.slice(1));
+  return m + ({ 1: "A", 11: "J", 12: "Q", 13: "K" }[n] || String(n));
+}
+
+function mkLabel(m, c) {
+  return CIRCLE[c] + cardName(m.cards[c]);
+}
+
+function award(m, c, w, notes, players) {
+  m.awards.push({ c, w });
+  notes.push(nameOf(players, w) + " さんが " + mkLabel(m, c) + " を獲得!");
+}
+
+// 同点のカードを、順番に競り合いにする。全部終われば交換へ
+function marketNextRaise(G, m, room, upd, coins, notes) {
+  const players = room.players || {};
+  const canB = (id) => canBorrow(room, id, upd) && !m.debtors[id];
+  for (;;) {
+    if (!m.queue.length) return marketToSwap(G, m, room, upd, coins, notes);
+    const c = m.queue.shift();
+    const tied = m.ties["c" + c] || [];
+    const bids = {};
+    tied.forEach((id) => {
+      bids[id] = m.bets[id].n;
+    });
+    const top = bids[tied[0]];
+    const names = tied.map((id) => nameOf(players, id)).join("・");
+    if (!tied.some((id) => coins[id] >= top + 1 - bids[id] || m.debtors[id] || canB(id))) {
+      const w = tied[Math.floor(Math.random() * tied.length)];
+      notes.push(mkLabel(m, c) + " は " + names + " が同点。全員コイン不足のため抽選");
+      award(m, c, w, notes, players);
+      continue;
+    }
+    const R = { c, tied, folded: {}, foldOrder: [], top, bids };
+    const res = raiseNext(Object.assign({}, R, { debtors: m.debtors }), coins, 0, notes, players, canB);
+    if (res.parent) {
+      award(m, c, res.parent, notes, players);
+      continue;
+    }
+    m.raise = R;
+    m.stage = "raise";
+    G.turn = res.turn;
+    notes.push("同点!" + mkLabel(m, c) + " を " + names + " で競り合い(" + top + "枚)");
+    return;
+  }
+}
+
+function marketToSwap(G, m, room, upd, coins, notes) {
+  const players = room.players || {};
+  m.raise = null;
+  if (m.awards.length) {
+    m.awards.sort((a, b) => a.c - b.c);
+    m.stage = "swap";
+    G.turn = m.awards[0].w;
+    notes.push(nameOf(players, G.turn) + " さんが交換する手札を選んでいます");
+    return;
+  }
+  marketNextLap(G, m, room, upd, coins, notes);
+}
+
+// 1周目で誰も賭けなかったカードがあれば2周目。なければチェンジへ
+function marketNextLap(G, m, room, upd, coins, notes) {
+  const unbet = m.avail.filter((c) => !m.sold["c" + c]);
+  if (m.lap === 1 && unbet.length) {
+    const need = marketNeed(room, upd, G.order, G.lead, m.debtors);
+    if (need.length) {
+      m.lap = 2;
+      m.avail = unbet;
+      m.need = need;
+      m.bets = {};
+      m.ties = {};
+      m.queue = [];
+      m.awards = [];
+      m.stage = "blind";
+      G.turn = null;
+      notes.push("2周目!残りのカード(" + unbet.map((c) => mkLabel(m, c)).join(" ") + ")にベット");
+      G.market = m;
+      return;
+    }
+  }
+  const left = m.avail.filter((c) => !m.sold["c" + c]);
+  if (left.length || m.lap === 2) {
+    const rest = [0, 1, 2].filter((c) => !m.sold["c" + c]);
+    if (rest.length) notes.push("売れ残り(" + rest.map((c) => mkLabel(m, c)).join(" ") + ")は捨て札");
+  }
+  G.market = m;
+  goChangeG(G, room, upd, notes.join("\n"));
+  notes.length = 0;
+}
+
+function writeMarket(upd, G, m, notes) {
+  if (G.phase === "market") G.market = m;
+  if (notes.length) G.notice = note(notes.join("\n"));
+  upd["game"] = clone(G);
+  return upd;
+}
+
+function applyMarket(room, act) {
+  const G = clone(room.game);
+  if (!G.market) return null;
+  const m = normMarket(G.market);
+  const uid = act.uid;
+  const players = room.players || {};
+  const upd = {};
+  const notes = [];
+  const coins = {};
+  G.order.forEach((id) => {
+    coins[id] = coinsOf(room, upd, id);
+  });
+  const canB = (id) => canBorrow(room, id, upd) && !m.debtors[id];
+
+  // --- 伏せてベット / パス ---
+  if (m.stage === "blind") {
+    if (act.type !== "mbet" && act.type !== "mpass") return null;
+    if (!m.need.includes(uid) || m.bets[uid] !== undefined) return null;
+    let bet = { c: -1, n: 0 };
+    if (act.type === "mbet") {
+      const c = Number(act.c);
+      const n = Math.floor(Number(act.n) || 0);
+      const cap = act.borrow && canB(uid) ? MK_MAX : Math.min(MK_MAX, coins[uid]);
+      if (!m.avail.includes(c) || m.sold["c" + c] || n < 1 || n > cap) return null;
+      bet = { c, n };
+    }
+    m.bets[uid] = bet;
+    if (!m.need.every((id) => m.bets[id] !== undefined)) {
+      upd["game/market/bets/" + uid] = bet;
+      return upd;
+    }
+    // 全員そろった → 一斉公開。ベットはこの時点でポットへ(足りない分は借金)
+    const god = [];
+    m.need.forEach((id) => {
+      const b = m.bets[id];
+      if (!(b.n > 0)) return;
+      G.pot = (G.pot || 0) + b.n;
+      if (payCoins(upd, room, id, coins, b.n) > 0) {
+        m.debtors[id] = true;
+        god.push(nameOf(players, id));
+      }
+    });
+    m.stage = "open";
+    m.id = Date.now();
+    notes.push("一斉公開!" + (god.length ? "\n" + god.join("・") + " さんが神の手を借りました" : ""));
+    return writeMarket(upd, G, m, notes);
+  }
+
+  // --- 同点の競り合い ---
+  if (m.stage === "raise") {
+    if (uid !== G.turn || !m.raise) return null;
+    const R = m.raise;
+    const idx = R.tied.indexOf(uid);
+    if (act.type === "raise") {
+      const pay = R.top + 1 - (R.bids[uid] || 0);
+      const newBorrow = !m.debtors[uid] && coins[uid] < pay;
+      if (newBorrow && !(act.borrow && canB(uid))) return null;
+      const bw = payCoins(upd, room, uid, coins, pay);
+      G.pot = (G.pot || 0) + pay;
+      R.bids[uid] = R.top + 1;
+      R.top += 1;
+      if (newBorrow) {
+        m.debtors[uid] = true;
+        notes.push(nameOf(players, uid) + " さんが神の手を借りました!");
+      }
+      notes.push(nameOf(players, uid) + " さん上乗せ → " + R.top + "枚" + (bw ? "(借金+" + bw + ")" : ""));
+      const alive = R.tied.filter((id) => !R.folded[id]);
+      if (newBorrow && alive.every((id) => m.debtors[id])) {
+        // 強制終了: 最後に借りた人が獲得
+        notes.push("全員が神の手を借りてしまったため、\n最後に神に助けを求めた人が獲得");
+        award(m, R.c, uid, notes, players);
+        m.raise = null;
+        marketNextRaise(G, m, room, upd, coins, notes);
+        return writeMarket(upd, G, m, notes);
+      }
+    } else if (act.type === "fold") {
+      R.folded[uid] = true;
+      R.foldOrder.push(uid);
+      notes.push(nameOf(players, uid) + " さんは降りました");
+    } else {
+      return null;
+    }
+    const res = raiseNext(Object.assign({}, R, { debtors: m.debtors }), coins, idx + 1, notes, players, canB);
+    if (res.turn) {
+      G.turn = res.turn;
+      return writeMarket(upd, G, m, notes);
+    }
+    award(m, R.c, res.parent, notes, players);
+    m.raise = null;
+    marketNextRaise(G, m, room, upd, coins, notes);
+    return writeMarket(upd, G, m, notes);
+  }
+
+  // --- 手に入れたカードと、手札1枚を交換 ---
+  if (m.stage === "swap") {
+    const a = m.awards[0];
+    if (act.type !== "mswap" || !a || a.w !== uid || G.turn !== uid) return null;
+    const hand = (room.hands && room.hands[uid]) || [];
+    const card = (act.cards || [])[0];
+    if (!card || !hand.includes(card)) return null;
+    upd["hands/" + uid] = hand.filter((x) => x !== card).concat([m.cards[a.c]]);
+    m.sold["c" + a.c] = uid;
+    m.awards.shift();
+    notes.push(nameOf(players, uid) + " さんが交換しました");
+    if (m.awards.length) {
+      G.turn = m.awards[0].w;
+      notes.push(nameOf(players, G.turn) + " さんが交換する手札を選んでいます");
+      return writeMarket(upd, G, m, notes);
+    }
+    marketNextLap(G, m, room, upd, coins, notes);
+    return writeMarket(upd, G, m, notes);
+  }
+  return null;
+}
+
+// 一斉公開を約3秒見せてから、勝者と競り合いを決める(ホストだけが呼ぶ)
+let marketTimer = null;
+export function checkMarket(roomId, getRoom) {
+  if (marketTimer) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || g.phase !== "market" || !g.market || g.market.stage !== "open") return;
+  const openId = g.market.id;
+  marketTimer = setTimeout(async () => {
+    marketTimer = null;
+    const r = getRoom();
+    const gg = r && r.game;
+    if (!gg || gg.phase !== "market" || !gg.market || gg.market.stage !== "open" || gg.market.id !== openId) return;
+    const G = clone(gg);
+    const m = normMarket(G.market);
+    const players = r.players || {};
+    const upd = {};
+    const notes = [];
+    const coins = {};
+    G.order.forEach((id) => {
+      coins[id] = coinsOf(r, upd, id);
+    });
+    m.awards = [];
+    m.queue = [];
+    m.ties = {};
+    m.avail.forEach((c) => {
+      const bidders = m.need.filter((id) => m.bets[id] && m.bets[id].c === c && m.bets[id].n > 0);
+      if (!bidders.length) return;
+      const top = Math.max(...bidders.map((id) => m.bets[id].n));
+      const tops = bidders.filter((id) => m.bets[id].n === top);
+      if (tops.length === 1) award(m, c, tops[0], notes, players);
+      else {
+        m.ties["c" + c] = tops;
+        m.queue.push(c);
+      }
+    });
+    // 親が入っている同点を先に。あとはカードの順
+    m.queue.sort((a, b) => {
+      const pa = m.ties["c" + a].includes(G.lead) ? 0 : 1;
+      const pb = m.ties["c" + b].includes(G.lead) ? 0 : 1;
+      return pa - pb || a - b;
+    });
+    if (!m.awards.length && !m.queue.length) notes.push("誰もベットしませんでした");
+    marketNextRaise(G, m, r, upd, coins, notes);
+    await update(ref(db, "rooms/" + roomId), writeMarket(upd, G, m, notes));
+  }, 3000);
 }
 
 // ===== 席決めオークション =====
@@ -1080,9 +1556,9 @@ function finishSeats(upd, room, s, round, pot, text) {
   const placed = new Set(seats.filter(Boolean));
   const rest = shuffle((s.ask || []).filter((id) => !placed.has(id)));
   for (let i = 0; i < seats.length; i++) if (!seats[i]) seats[i] = rest.shift();
-  const first = s.first || seats[0];
-  dealAndChange(upd, room, seats, first, round, pot,
-    [text, "席が決まりました!"].filter(Boolean).join("\n"));
+  const lead = s.first || seats[Math.floor(Math.random() * seats.length)];
+  dealAndMarket(upd, room, seats, lead, round, pot,
+    [text, "席が決まりました!"].filter(Boolean).join("\n"), s.first || null);
 }
 
 function applySeat(room, act) {

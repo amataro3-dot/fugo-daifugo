@@ -10,6 +10,8 @@ let winDone = null;
 let lastArgs = null;
 let lastFieldKey = "";
 let bidPick = 1;
+let marketSel = null;
+let marketKey = "";
 let curSettings = {};
 
 const GOD_ASK = "次のターンからマイナスになります。\n富豪の神の手を借りますか?";
@@ -17,6 +19,21 @@ const GOD_ASK = "次のターンからマイナスになります。\n富豪の�
 // 神の手を借りられるか(借金ルールあり、かつ、このゲームでまだ使っていない)
 function canBorrowMe(p) {
   return curSettings.debt === "on" && !!p && !((p.debtTotal || 0) > 0);
+}
+
+// 「神の手を借りますか?」を聞く(借りるなら true)
+async function askBorrow(short) {
+  const ok = await askChoice(GOD_ASK + "\n(足りない " + short + " 枚を借ります)", [
+    { label: "借りる", value: "yes" },
+    { label: "借りない", value: "no" }
+  ]);
+  return ok === "yes";
+}
+
+// 「借りない」を選んだとき: 枚数を手持ちの枚数に戻して、選び直し
+function backToHave(have) {
+  bidPick = Math.max(1, have);
+  if (lastArgs) renderGame(...lastArgs);
 }
 
 // 自分の名前の前に「貧」マークを付ける
@@ -124,12 +141,32 @@ function seatEl(id, p, count, game, openHand, hand) {
     const t = document.createElement("div");
     t.className = "small";
     if (!inBid) t.textContent = "パス(0枚)";
-    else if (b.stage === "blind") t.textContent = bids[id] ? "入札済み" : "考え中…";
+    else if (b.stage === "blind") t.textContent = bids[id] !== undefined ? "入札済み" : "考え中…";
+    else if (!(bids[id] > 0)) t.textContent = "パス";
     else {
       t.textContent = "入札 " + bids[id] + "枚" + (b.folded && b.folded[id] ? "・降りた" : "");
       t.style.color = "#f2c230";
     }
     d.appendChild(t);
+  }
+  if (game.phase === "market" && game.market) {
+    const m = game.market;
+    const bets = m.bets || {};
+    const t = document.createElement("div");
+    t.className = "small";
+    const b = bets[id];
+    if (m.stage === "blind") {
+      t.textContent = !(m.need || []).includes(id) ? "パス(0枚)" : b === undefined ? "考え中…" : b.n > 0 ? "ベット済み" : "パス";
+    } else if (m.stage === "raise" && m.raise && m.raise.tied.includes(id)) {
+      t.textContent = "競り " + (m.raise.bids || {})[id] + "枚" + (m.raise.folded && m.raise.folded[id] ? "・降りた" : "");
+      t.style.color = "#f2c230";
+    } else if (b && b.n > 0) {
+      t.textContent = CIRCLE[b.c] + "に" + b.n + "枚";
+      t.style.color = "#f2c230";
+    } else if (b) {
+      t.textContent = "パス";
+    }
+    if (t.textContent) d.appendChild(t);
   }
   if (game.out && game.out[id]) {
     const fm = document.createElement("div");
@@ -261,16 +298,18 @@ function bidFieldEl(field, b, players) {
   const bids = b.bids || {};
   if (b.stage === "blind") {
     line("親決めオークション", "#ffd84a", "17px");
-    const n = (b.need || []).filter((id) => bids[id]).length;
+    const n = (b.need || []).filter((id) => bids[id] !== undefined).length;
     line("入札 " + n + " / " + (b.need || []).length + " 人");
     return;
   }
   if (b.stage === "open") {
     line("一斉公開!", "#ffd84a", "17px");
-    (b.need || []).slice().sort((x, y) => bids[y] - bids[x]).forEach((id) => {
-      line(nm(id) + "  " + bids[id] + "枚", bids[id] === b.top ? "#fff" : null);
+    (b.need || []).slice().sort((x, y) => (bids[y] || 0) - (bids[x] || 0)).forEach((id) => {
+      const debt = b.debtors && b.debtors[id] ? "(神の手)" : "";
+      line(nm(id) + "  " + (bids[id] > 0 ? bids[id] + "枚" + debt : "パス"), bids[id] === b.top && b.top > 0 ? "#fff" : "#aaa");
     });
-    if (b.parent) line("→ " + nm(b.parent) + " さんが親!", "#ffd84a");
+    if (b.parent && !(b.top > 0)) line("→ 誰も入札せず。" + nm(b.parent) + " さんが親", "#ffd84a");
+    else if (b.parent) line("→ " + nm(b.parent) + " さんが親!", "#ffd84a");
     else line("→ 同点!競り上げへ", "#ffd84a");
     return;
   }
@@ -386,13 +425,32 @@ function bidControls(root, g, me, uid, maxBid, onAction) {
     return;
   }
   if (b.stage === "blind") {
-    if (bids[uid]) {
-      msg.textContent = "入札済み(" + bids[uid] + "枚)。全員の入札を待っています";
+    if (bids[uid] !== undefined) {
+      msg.textContent = (bids[uid] > 0 ? "入札済み(" + bids[uid] + "枚)" : "パスしました") + "。全員の入札を待っています";
       return;
     }
-    const cap = Math.min(maxBid, me.coins || 0);
-    msg.textContent = "賭ける枚数を選んでください(1〜" + cap + "枚)\n単独で最高額なら親(最初に出す人)。出したコインはポットへ";
-    bidStepper(root, cap, "b" + g.round, "入札する", (n) => onAction({ type: "bid", n }));
+    const have = me.coins || 0;
+    const cap = canBorrowMe(me) ? maxBid : Math.min(maxBid, have);
+    msg.textContent = "賭ける枚数を選んでください(1〜" + cap + "枚)\n単独で最高額なら親(最初に出す人)。出したコインはポットへ" +
+      (have < cap ? "\n手持ちより多い枚数は、神の手を借りて賭けられます" : "");
+    bidStepper(root, cap, "b" + g.round, "入札する", async (n) => {
+      if (n > have) {
+        if (await askBorrow(n - have)) onAction({ type: "bid", n, borrow: true });
+        else backToHave(have);
+        return;
+      }
+      onAction({ type: "bid", n });
+    });
+    if (have < 1) {
+      const ps = document.createElement("button");
+      ps.className = "btn";
+      ps.textContent = "パス(神の手を借りない)";
+      ps.onclick = () => {
+        ps.disabled = true;
+        onAction({ type: "bpass" });
+      };
+      root.appendChild(ps);
+    }
     return;
   }
   if (b.stage === "open") {
@@ -522,13 +580,9 @@ function seatControls(root, g, me, uid, players, onAction) {
     let goBtn = null;
     goBtn = bidStepper(root, cap, "s" + g.round, "入札する", async (n) => {
       if (n > (me.coins || 0)) {
-        // 手持ちより多い → 神の手の確認。「借りない」ならパス
-        const ok = await askChoice(GOD_ASK + "\n(足りない " + (n - (me.coins || 0)) + " 枚を借ります)", [
-          { label: "借りる", value: "yes" },
-          { label: "借りない(パス)", value: "no" }
-        ]);
-        if (ok === "yes") onAction({ type: "sbid", n, borrow: true });
-        else onAction({ type: "spass" });
+        // 手持ちより多い → 神の手の確認。「借りない」なら手持ちの枚数に戻す
+        if (await askBorrow(n - (me.coins || 0))) onAction({ type: "sbid", n, borrow: true });
+        else backToHave(me.coins || 0);
         return;
       }
       onAction({ type: "sbid", n });
@@ -639,6 +693,157 @@ function splitLayout(others) {
   return { left, top, right };
 }
 
+// ===== カードマーケット =====
+
+const CIRCLE = ["①", "②", "③"];
+
+function mkCardName(c) {
+  if (!c) return "";
+  if (isJoker(c)) return "JOKER";
+  return SUIT_MARK[suitOf(c)] + label(numOf(c));
+}
+
+// マーケット中の、場の表示(3枚のカード)
+function marketFieldEl(field, m, players, uid, canPick) {
+  const nm = (id) => (players[id] ? players[id].name : "");
+  const bets = m.bets || {};
+  const sold = m.sold || {};
+  const avail = m.avail || [];
+  const head = document.createElement("div");
+  head.textContent = "カードマーケット" + (m.lap === 2 ? "(2周目)" : "");
+  head.style.cssText = "color:#ffd84a;font-size:17px;font-weight:bold;margin-bottom:4px";
+  field.appendChild(head);
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;gap:6px;justify-content:center";
+  (m.cards || []).forEach((card, c) => {
+    const box = document.createElement("div");
+    box.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:2px;min-width:50px";
+    const lb = document.createElement("div");
+    lb.textContent = CIRCLE[c];
+    lb.style.cssText = "font-size:15px;color:#fff";
+    box.appendChild(lb);
+    const el = cardEl(card);
+    const owner = sold["c" + c];
+    const open = avail.includes(c) && !owner;
+    if (!open) el.style.opacity = "0.35";
+    if (m.stage === "raise" && m.raise && m.raise.c === c) el.style.outline = "3px solid #ff9a5c";
+    if (canPick && open) {
+      if (marketSel === c) el.classList.add("sel");
+      el.onclick = () => {
+        marketSel = c;
+        if (lastArgs) renderGame(...lastArgs);
+      };
+    }
+    box.appendChild(el);
+    const st = document.createElement("div");
+    st.style.cssText = "font-size:12px;color:#cfe5da;text-align:center;line-height:1.3";
+    if (owner) st.textContent = nm(owner);
+    else if (!avail.includes(c)) st.textContent = "—";
+    else if (m.stage === "open") {
+      const list = (m.need || []).filter((id) => bets[id] && bets[id].c === c && bets[id].n > 0);
+      st.textContent = list.length ? list.map((id) => nm(id) + bets[id].n).join("\n") : "なし";
+      st.style.whiteSpace = "pre-line";
+      st.style.color = "#fff";
+    } else if (m.stage === "swap") {
+      const a = (m.awards || []).find((x) => x.c === c);
+      st.textContent = a ? "→" + nm(a.w) : "";
+    }
+    box.appendChild(st);
+    row.appendChild(box);
+  });
+  field.appendChild(row);
+  const foot = document.createElement("div");
+  foot.style.cssText = "font-size:13px;margin-top:4px;color:#cfe5da";
+  if (m.stage === "blind") {
+    const n = (m.need || []).filter((id) => bets[id] !== undefined).length;
+    foot.textContent = "ベット " + n + " / " + (m.need || []).length + " 人";
+  } else if (m.stage === "open") {
+    foot.textContent = "一斉公開!";
+    foot.style.color = "#ffd84a";
+  } else if (m.stage === "raise" && m.raise) {
+    foot.textContent = CIRCLE[m.raise.c] + " 競り合い中(" + m.raise.top + "枚)";
+    foot.style.color = "#ffd84a";
+  } else if (m.stage === "swap") {
+    const a = (m.awards || [])[0];
+    if (a) foot.textContent = nm(a.w) + " さんが交換中";
+  }
+  field.appendChild(foot);
+}
+
+// マーケット中の、自分の操作エリア
+function marketControls(root, g, me, uid, players, onAction) {
+  const m = g.market;
+  const bets = m.bets || {};
+  const msg = msgEl(root);
+  const nm = (id) => (players[id] ? players[id].name : "");
+  if (m.stage === "blind") {
+    if (!(m.need || []).includes(uid)) {
+      msg.textContent = "コインが0枚なので、今回のマーケットはパスです";
+      return;
+    }
+    const b = bets[uid];
+    if (b !== undefined) {
+      msg.textContent = (b.n > 0 ? "ベット済み(" + CIRCLE[b.c] + "に" + b.n + "枚)" : "パスしました") + "。全員を待っています";
+      return;
+    }
+    const have = me.coins || 0;
+    const cap = canBorrowMe(me) ? 5 : Math.min(5, have);
+    const pick = marketSel !== null && (m.avail || []).includes(marketSel) && !(m.sold || {})["c" + marketSel];
+    msg.textContent = (pick ? "選択中: " + CIRCLE[marketSel] + mkCardName(m.cards[marketSel]) : "場のカードをタップして選んでください") +
+      "\nベット(1〜" + cap + "枚)はポットへ。競り負けても戻りません";
+    if (cap >= 1) {
+      bidStepper(root, cap, "m" + g.round + "_" + m.lap, "ベットする", async (n) => {
+        if (!pick) {
+          if (lastArgs) renderGame(...lastArgs);
+          return;
+        }
+        if (n > have) {
+          if (await askBorrow(n - have)) onAction({ type: "mbet", c: marketSel, n, borrow: true });
+          else backToHave(have);
+          return;
+        }
+        onAction({ type: "mbet", c: marketSel, n });
+      });
+    }
+    const ps = document.createElement("button");
+    ps.className = "btn";
+    ps.textContent = "パス(ベットしない)";
+    ps.onclick = () => {
+      ps.disabled = true;
+      onAction({ type: "mpass" });
+    };
+    root.appendChild(ps);
+    return;
+  }
+  if (m.stage === "open") {
+    msg.textContent = "結果発表中…";
+    return;
+  }
+  if (m.stage === "raise" && m.raise) {
+    const R = m.raise;
+    if (!R.tied.includes(uid) || (R.folded && R.folded[uid])) {
+      msg.textContent = "同点の人が " + CIRCLE[R.c] + " を競り合い中です";
+      return;
+    }
+    if (g.turn !== uid) {
+      msg.textContent = "相手の番です(今 " + R.top + "枚)";
+      return;
+    }
+    raiseButtons(root, msg, R.top, (R.bids || {})[uid], me.coins, onAction,
+      !!(m.debtors && m.debtors[uid]), canBorrowMe(me));
+    return;
+  }
+  if (m.stage === "swap") {
+    const a = (m.awards || [])[0];
+    if (a && a.w === uid && g.turn === uid) {
+      msg.textContent = CIRCLE[a.c] + mkCardName(m.cards[a.c]) + " を獲得!\n交換して捨てる手札を1枚タップしてください";
+      msg.style.color = "#ffd84a";
+    } else if (a) {
+      msg.textContent = nm(a.w) + " さんが交換する手札を選んでいます";
+    }
+  }
+}
+
 export function renderGame(root, room, uid, onLeave, onAction) {
   lastArgs = [root, room, uid, onLeave, onAction];
   curSettings = room.settings || {};
@@ -659,7 +864,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     renderFinal(root, g, onAction);
     return;
   }
-  if (g.phase === "play" || g.phase === "change" || g.phase === "bid" || g.phase === "seat") {
+  if (g.phase === "play" || g.phase === "change" || g.phase === "bid" || g.phase === "seat" || g.phase === "market") {
     winShownId = null;
     winDone = null;
   }
@@ -677,8 +882,14 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     const pop = document.createElement("div");
     pop.className = "popup";
     pop.textContent = g.notice.text;
+    // 画面の上(ラウンド・ポットの帯のすぐ下)に細い帯で出す。場のカードには重ねない
+    pop.style.cssText =
+      "top:44px;left:50%;transform:translateX(-50%);width:calc(100% - 24px);max-width:456px;" +
+      "font-size:15px;line-height:1.35;padding:8px 12px;border-radius:10px;" +
+      "background:rgba(0,0,0,0.88);border:1px solid #f2c230";
     document.body.appendChild(pop);
-    setTimeout(() => pop.remove(), 2200);
+    const lines = String(g.notice.text).split("\n").length;
+    setTimeout(() => pop.remove(), Math.min(4500, 1800 + lines * 450));
   }
 
   if (g.foul && !(g.foul.acks && g.foul.acks[uid]) && !spectator) {
@@ -783,6 +994,16 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     const js = g.field.jsuits || {};
     g.field.cards.forEach((c) => row.appendChild(cardEl(c, "", js[c])));
     field.appendChild(row);
+  } else if (g.phase === "market" && g.market) {
+    const mm = g.market;
+    const mk2 = g.round + "_" + mm.lap;
+    if (marketKey !== mk2) {
+      marketKey = mk2;
+      marketSel = null;
+    }
+    const canPick = !spectator && mm.stage === "blind" && (mm.need || []).includes(uid) &&
+      (mm.bets || {})[uid] === undefined;
+    marketFieldEl(field, mm, players, uid, canPick);
   } else if (g.phase === "bid" && g.bid) {
     bidFieldEl(field, g.bid, players);
   } else if (g.phase === "change") {
@@ -827,7 +1048,8 @@ export function renderGame(root, room, uid, onLeave, onAction) {
 
   const inChange = g.phase === "change";
   const inBid = g.phase === "bid" && !!g.bid;
-  const myTurn = (g.phase === "play" || inChange || inBid) && g.turn === uid;
+  const inMarket = g.phase === "market" && !!g.market;
+  const myTurn = (g.phase === "play" || inChange || inBid || inMarket) && g.turn === uid;
   const info = document.createElement("div");
   info.className = "me-box";
   info.style.fontSize = "17px";
@@ -851,8 +1073,20 @@ export function renderGame(root, room, uid, onLeave, onAction) {
   sortHand(myHand).forEach((c) => {
     const el = cardEl(c);
     if (selected.includes(c)) el.classList.add("sel");
-    el.onclick = () => {
+    el.onclick = async () => {
       if (inBid) return;
+      if (inMarket) {
+        // マーケットで手に入れたカードと交換する手札を選ぶ
+        const m = g.market;
+        const a = (m.awards || [])[0];
+        if (m.stage !== "swap" || !a || a.w !== uid || g.turn !== uid) return;
+        const ok = await askChoice(mkCardName(c) + " を捨てて\n" + mkCardName(m.cards[a.c]) + " と交換しますか?", [
+          { label: "交換する", value: "yes" },
+          { label: "やめる", value: "no" }
+        ]);
+        if (ok === "yes") onAction({ type: "mswap", cards: [c] });
+        return;
+      }
       if (selected.includes(c)) {
         selected = selected.filter((x) => x !== c);
       } else if (inChange) {
@@ -868,6 +1102,10 @@ export function renderGame(root, room, uid, onLeave, onAction) {
 
   if (inBid) {
     bidControls(root, g, me, uid, (room.settings && room.settings.bidMax) || 5, onAction);
+    return;
+  }
+  if (inMarket) {
+    marketControls(root, g, me, uid, players, onAction);
     return;
   }
 

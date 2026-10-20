@@ -1,5 +1,6 @@
 import {
-  findMoves, effStr, lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJoker, judge
+  findMoves, effStr, lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJoker, judge,
+  numOf, strength
 } from "./rules.js";
 
 export function cpuChoose(hand, field, rev, lock) {
@@ -103,4 +104,45 @@ export function cpuSeatBid(coins, max) {
 // 親決めの競り上げで、神の手を借りて(借金して)上乗せするか: 親になれば即上がりのときだけ
 export function cpuBorrowRaise(hand) {
   return instantWin(hand);
+}
+
+// ===== カードマーケット =====
+
+// カードの欲しさ(ジョーカー・♠3・2が高い。手札と同じ数字ならペアになるので高い)
+function wantValue(card, hand) {
+  let v = 0;
+  if (isJoker(card)) v = 9;
+  else if (card === "S3") v = 7;
+  else if (numOf(card) === 2) v = 5;
+  else if (numOf(card) === 1) v = 4;
+  else v = (strength(card) - 3) / 4;
+  if (!isJoker(card) && hand.some((h) => !isJoker(h) && numOf(h) === numOf(card))) v += 4;
+  return v;
+}
+
+// ベット: 一番欲しいカードに、少なめに賭ける
+export function cpuMarketBet(hand, cards, avail, coins) {
+  const pass = { type: "mpass" };
+  if (coins < 1 || !avail.length) return pass;
+  let best = avail[0];
+  avail.forEach((c) => {
+    if (wantValue(cards[c], hand) > wantValue(cards[best], hand)) best = c;
+  });
+  const v = wantValue(cards[best], hand);
+  if (v >= 8 && coins >= 6) return { type: "mbet", c: best, n: Math.min(coins, 2 + Math.floor(Math.random() * 2)) };
+  if (v >= 6 && coins >= 6) return { type: "mbet", c: best, n: Math.min(coins, 1 + Math.floor(Math.random() * 2)) };
+  if (v >= 4 && coins >= 12 && Math.random() < 0.4) return { type: "mbet", c: best, n: 1 };
+  return pass;
+}
+
+// 交換: いちばん要らない手札を捨てる(ペアになっている札は残す)
+export function cpuMarketSwap(hand, newCard) {
+  const all = hand.concat([newCard]);
+  const score = (c) => {
+    let v = strength(c);
+    if (!isJoker(c) && all.filter((x) => x !== c && !isJoker(x) && numOf(x) === numOf(c)).length) v += 10;
+    if (!isJoker(c) && isForbidden(c, false)) v -= 3;
+    return v;
+  };
+  return hand.slice().sort((a, b) => score(a) - score(b))[0];
 }
