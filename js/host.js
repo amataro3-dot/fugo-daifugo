@@ -3,7 +3,7 @@ import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
   canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
 } from "./rules.js";
-import { cpuChoose, cpuChange, cpuBid, cpuRaise, cpuSeatBid } from "./cpu.js";
+import { cpuChoose, cpuChange, cpuBid, cpuRaise, cpuSeatBid, cpuBorrowRaise } from "./cpu.js";
 
 function draw(state, n) {
   const out = [];
@@ -20,6 +20,31 @@ function draw(state, n) {
 
 function note(text) {
   return { text, id: Date.now() };
+}
+
+// ===== 借金ルール「富豪の神の手」の共通部分 =====
+
+const GOD_FORCE_PARENT = "全員が神の手を借りてしまったため、\n最後に神に助けを求めた人から\nゲーム始めさせてもらいます。";
+const GOD_FORCE_SEAT = "全員が神の手を借りてしまいましたので、\n最後に神に助けを求めた人から\n決めてください。";
+
+// 神の手を借りられるか(借金ルールあり、かつ、このゲームでまだ使っていない)
+function canBorrow(room, id) {
+  const p = (room.players || {})[id];
+  return !!(room.settings && room.settings.debt === "on" && p && !((p.debtTotal || 0) > 0));
+}
+
+// コインを払う。手持ちで足りない分は借金にする(コインはマイナスになる)。借りた枚数を返す
+function payCoins(upd, room, id, coins, pay) {
+  const p = (room.players || {})[id] || {};
+  const before = coins[id] || 0;
+  const borrowed = Math.max(0, pay - Math.max(before, 0));
+  coins[id] = before - pay;
+  upd["players/" + id + "/coins"] = coins[id];
+  if (borrowed > 0) {
+    upd["players/" + id + "/debt"] = (p.debt || 0) + borrowed;
+    upd["players/" + id + "/debtTotal"] = (p.debtTotal || 0) + borrowed;
+  }
+  return borrowed;
 }
 
 export async function startGame(roomId, roomData) {
@@ -84,7 +109,8 @@ export function sendAction(roomId, uid, act) {
     lock: act.lock || "none",
     lockSuit: act.lockSuit || null,
     gek: !!act.gek,
-    n: act.n || 0
+    n: act.n || 0,
+    borrow: !!act.borrow
   });
 }
 
@@ -102,12 +128,14 @@ function nextPlayer(order, passed, idx) {
 // ===== カードチェンジ =====
 
 // 次にチェンジできる人をさがす(パス済み・3回済み・コイン不足の人は飛ばす)
-function pickChanger(order, fromIdx, counts, done, coins) {
+// (コインが足りなくても、神の手を借りられる人は番が回る)
+function pickChanger(order, fromIdx, counts, done, coins, canB) {
   const n = order.length;
   for (let i = 1; i <= n; i++) {
     const id = order[(fromIdx + i) % n];
     const c = counts[id] || 0;
-    if (!done[id] && c < 3 && (coins[id] || 0) >= Math.pow(2, c)) return id;
+    const have = coins[id] || 0;
+    if (!done[id] && c < 3 && (have >= Math.pow(2, c) || (have >= 1 && canB(id)))) return id;
   }
   return null;
 }
@@ -132,7 +160,8 @@ function applyChange(room, act) {
 
   if (act.type === "change") {
     const cost = Math.pow(2, cnt);
-    if (cnt >= 3 || done[uid] || coinsNow[uid] < cost) return null;
+    if (cnt >= 3 || done[uid]) return null;
+    if (coinsNow[uid] < cost && !(act.borrow && coinsNow[uid] >= 1 && canBorrow(room, uid))) return null;
     const hand = (room.hands && room.hands[uid]) || [];
     const card = (act.cards || [])[0];
     if (!card || !hand.includes(card)) return null;
@@ -141,12 +170,12 @@ function applyChange(room, act) {
     upd["hands/" + uid] = hand.filter((c) => c !== card).concat([nc]);
     upd["deck"] = state.deck.length ? state.deck : null;
     upd["lot"] = state.lot;
-    coinsNow[uid] -= cost;
-    upd["players/" + uid + "/coins"] = coinsNow[uid];
+    const borrowed = payCoins(upd, room, uid, coinsNow, cost);
     upd["game/pot"] = (g.pot || 0) + cost;
+    const godNote = borrowed ? nameOf(players, uid) + " さんが神の手を借りました(借金" + borrowed + ")" : "";
     counts[uid] = cnt + 1;
     chUpd["game/change/counts/" + uid] = cnt + 1;
-    lotNote = state.notice;
+    lotNote = [godNote, state.notice].filter(Boolean).join("\n");
   } else if (act.type === "cpass") {
     done[uid] = true;
     chUpd["game/change/done/" + uid] = true;
@@ -154,7 +183,7 @@ function applyChange(room, act) {
     return null;
   }
 
-  const next = pickChanger(order, idx, counts, done, coinsNow);
+  const next = pickChanger(order, idx, counts, done, coinsNow, (id) => canBorrow(room, id));
   if (next) {
     Object.assign(upd, chUpd);
     upd["game/turn"] = next;
@@ -208,16 +237,18 @@ function startBid(upd, order, coinsNow, players, lotNote) {
 }
 
 // 競り上げで、次に聞く人をさがす(コインが足りない人は自動で降りる)
-function raiseNext(bid, coins, startIdx, notes, players) {
+// canB: 神の手を借りられるか。借りられる人・借金中の人は、自動では降りない
+function raiseNext(bid, coins, startIdx, notes, players, canB) {
   const tied = bid.tied;
   const folded = bid.folded;
+  const debtors = bid.debtors || {};
   for (let k = 0; k < tied.length; k++) {
     const alive = tied.filter((id) => !folded[id]);
     if (alive.length <= 1) return { parent: alive[0] };
     const id = tied[(startIdx + k) % tied.length];
     if (folded[id]) continue;
     const need = bid.top + 1 - (bid.bids[id] || 0);
-    if ((coins[id] || 0) >= need) return { turn: id };
+    if ((coins[id] || 0) >= need || debtors[id] || (canB && canB(id))) return { turn: id };
     folded[id] = true;
     notes.push(nameOf(players, id) + " さんはコイン不足で降りました");
   }
@@ -273,32 +304,46 @@ function applyBid(room, act) {
     if (uid !== g.turn) return null;
     const nb = {
       stage: "raise", need, bids, top: b.top,
-      tied: (b.tied || []).slice(), folded: Object.assign({}, b.folded || {})
+      tied: (b.tied || []).slice(), folded: Object.assign({}, b.folded || {}),
+      debtors: Object.assign({}, b.debtors || {})
     };
     const idx = nb.tied.indexOf(uid);
     const notes = [];
+    const canB = (id) => canBorrow(room, id);
     if (act.type === "raise") {
       const pay = nb.top + 1 - (bids[uid] || 0);
-      if (coins[uid] < pay) return null;
-      coins[uid] -= pay;
+      const isDebtor = !!nb.debtors[uid];
+      const newBorrow = !isDebtor && coins[uid] < pay;
+      if (newBorrow && !(act.borrow && canB(uid))) return null;
+      const borrowed = payCoins(upd, room, uid, coins, pay);
       bids[uid] = nb.top + 1;
       nb.top += 1;
-      upd["players/" + uid + "/coins"] = coins[uid];
       upd["game/pot"] = (g.pot || 0) + pay;
-      notes.push(nameOf(players, uid) + " さん上乗せ → " + nb.top + "枚");
+      if (newBorrow) {
+        nb.debtors[uid] = true;
+        notes.push(nameOf(players, uid) + " さんが神の手を借りました!");
+      }
+      notes.push(nameOf(players, uid) + " さん上乗せ → " + nb.top + "枚" + (borrowed ? "(借金+" + borrowed + ")" : ""));
+      // 強制終了: 競りに残っている全員が借金した → 最後に借りた人が親
+      const alive = nb.tied.filter((id) => !nb.folded[id]);
+      if (newBorrow && alive.every((id) => nb.debtors[id])) {
+        goPlay(upd, uid, GOD_FORCE_PARENT + "\n" + nameOf(players, uid) + " さんが親!");
+        return upd;
+      }
     } else if (act.type === "fold") {
       nb.folded[uid] = true;
       notes.push(nameOf(players, uid) + " さんは降りました");
     } else {
       return null;
     }
-    const r = raiseNext(nb, coins, idx + 1, notes, players);
+    const r = raiseNext(nb, coins, idx + 1, notes, players, canB);
     if (r.parent) {
       goPlay(upd, r.parent,
         notes.join("\n") + "\n" + nameOf(players, r.parent) + " さんが親!(" + bids[r.parent] + "枚)");
       return upd;
     }
     if (!Object.keys(nb.folded).length) delete nb.folded;
+    if (!Object.keys(nb.debtors).length) delete nb.debtors;
     upd["game/bid"] = nb;
     upd["game/turn"] = r.turn;
     upd["game/notice"] = note(notes.join("\n"));
@@ -331,14 +376,15 @@ export function checkBid(roomId, getRoom) {
         coins[id] = (players[id] && players[id].coins) || 0;
       });
       const tied = b.tied || [];
-      if (!tied.some((id) => coins[id] >= 1)) {
+      const canB = (id) => canBorrow(r, id);
+      if (!tied.some((id) => coins[id] >= 1 || canB(id))) {
         // 同点の全員がコイン不足 → 抽選
         const p = tied[Math.floor(Math.random() * tied.length)];
         goPlay(upd, p, "同点の全員がコイン不足のため\n抽選で " + nameOf(players, p) + " さんが親!");
       } else {
         const nb = { stage: "raise", need: b.need, bids: b.bids, top: b.top, tied: tied.slice(), folded: {} };
         const notes = [];
-        const res = raiseNext(nb, coins, 0, notes, players);
+        const res = raiseNext(nb, coins, 0, notes, players, canB);
         if (res.parent) {
           goPlay(upd, res.parent, notes.join("\n") + "\n" + nameOf(players, res.parent) + " さんが親!");
         } else {
@@ -600,7 +646,7 @@ export function maybeCpu(roomId, getRoom) {
     if (phase === "change") {
       const cnt = ((gg.change && gg.change.counts) || {})[turn] || 0;
       const coins = (r.players[turn] && r.players[turn].coins) || 0;
-      sendAction(roomId, turn, cpuChange(hand, cnt, coins));
+      sendAction(roomId, turn, cpuChange(hand, cnt, coins, canBorrow(r, turn)));
       return;
     }
     const a = cpuChoose(hand, gg.field || null, !!gg.rev, gg.lock || null);
@@ -642,7 +688,14 @@ function maybeCpuBid(roomId, getRoom) {
     } else {
       if (gg.turn !== who || gg.bid.top !== top) return maybeCpu(roomId, getRoom);
       const pay = gg.bid.top + 1 - ((gg.bid.bids || {})[who] || 0);
-      sendAction(roomId, who, { type: cpuRaise(hand, coins, pay) ? "raise" : "fold" });
+      const isDebtor = !!(gg.bid.debtors && gg.bid.debtors[who]);
+      if (coins >= pay) {
+        sendAction(roomId, who, { type: cpuRaise(hand, coins, pay) ? "raise" : "fold" });
+      } else if ((isDebtor || canBorrow(r, who)) && cpuBorrowRaise(hand)) {
+        sendAction(roomId, who, { type: "raise", borrow: true });
+      } else {
+        sendAction(roomId, who, { type: "fold" });
+      }
     }
   }, stage === "blind" ? 800 : 1500);
 }
@@ -726,9 +779,16 @@ export async function settle(roomId, getRoom) {
     g.order.forEach((id) => {
       coinsAfter[id] = (players[id] && players[id].coins) || 0;
     });
+    let repaid = 0;
     if (winner) {
       coinsAfter[winner] += pot;
       upd["players/" + winner + "/coins"] = coinsAfter[winner];
+      // 借金がある勝者は、ポットから先に返す(コインがマイナスなので、足すだけで返済になる)
+      const d = (players[winner] && players[winner].debt) || 0;
+      if (d > 0) {
+        repaid = d;
+        if (coinsAfter[winner] > 0) upd["players/" + winner + "/debt"] = 0;
+      }
     }
     const outIds = g.order.filter((id) => coinsAfter[id] <= 0);
     const remaining = g.order.filter((id) => coinsAfter[id] > 0);
@@ -740,6 +800,7 @@ export async function settle(roomId, getRoom) {
       acks: {}
     };
     if (winner) result.winner = winner;
+    if (repaid) result.repaid = repaid;
     if (outIds.length) result.outIds = outIds;
     upd["game/pot"] = winner ? 0 : pot;
     upd["game/result"] = result;
@@ -783,7 +844,7 @@ function rankList(list, keyFn, startRank, desc) {
 
 async function nextRound(roomId, room) {
   const g = room.game;
-  const players = room.players || {};
+  const players = Object.assign({}, room.players || {});
   const rr = g.round;
   const upd = {};
 
@@ -797,6 +858,10 @@ async function nextRound(roomId, room) {
       exit[id] = rr;
       upd["players/" + id + "/exitRound"] = rr;
       upd["players/" + id + "/spectator"] = true;
+      // 退場の理由(最終順位で使う): 借金して負け / コイン0枚で負け
+      const why = ((players[id] && players[id].debt) || 0) > 0 ? "debt" : "zero";
+      upd["players/" + id + "/exitReason"] = why;
+      players[id] = Object.assign({}, players[id], { exitReason: why });
     }
   });
   const remaining = g.order.filter((id) => !exit[id]);
@@ -811,15 +876,19 @@ async function nextRound(roomId, room) {
         coins: p.coins || 0,
         debtTotal: p.debtTotal || 0,
         score: (p.coins || 0) - (p.debtTotal || 0),
-        exitRound: exit[id] || 0
+        exitRound: exit[id] || 0,
+        // 退場者の並び: 0枚で負け > 借金して負け > 反則・リタイヤ。同じ理由なら後で退場した人が上
+        exitKey: ({ zero: 3, debt: 2 }[p.exitReason] || 1) * 1000 + (exit[id] || 0)
       }));
     const alive = all.filter((x) => !x.exitRound);
     const gone = all.filter((x) => x.exitRound);
     const a = rankList(alive, (x) => x.score, 1, true);
-    const b = rankList(gone, (x) => x.exitRound, a.length + 1, true);
+    const b = rankList(gone, (x) => x.exitKey, a.length + 1, true);
     const ranking = a.concat(b).map((x) => {
       const o = { id: x.id, name: x.name, coins: x.coins, debtTotal: x.debtTotal, score: x.score, rank: x.rank };
       if (x.exitRound) o.exitRound = x.exitRound;
+      const why = players[x.id] && players[x.id].exitReason;
+      if (x.exitRound && why) o.exitReason = why;
       return o;
     });
     upd["game"] = { round: rr, phase: "final", pot: g.pot || 0, order: g.order, ranking };
@@ -915,6 +984,7 @@ function normSeat(s) {
   o.groups = (o.groups || []).map((x) => x || []);
   o.rank = o.rank || [];
   o.queue = o.queue || [];
+  o.debtors = o.debtors || {};
   if (o.raise) {
     o.raise.folded = o.raise.folded || {};
     o.raise.foldOrder = o.raise.foldOrder || [];
@@ -923,7 +993,7 @@ function normSeat(s) {
 }
 
 // 競り合いで次に聞く人(コイン不足は自動で降りる)。決着したら done
-function seatRaiseNext(s, coins, startIdx, notes, players) {
+function seatRaiseNext(s, coins, startIdx, notes, players, canB) {
   const R = s.raise;
   const tied = R.tied;
   for (let k = 0; k < tied.length; k++) {
@@ -932,7 +1002,7 @@ function seatRaiseNext(s, coins, startIdx, notes, players) {
     const id = tied[(startIdx + k) % tied.length];
     if (R.folded[id]) continue;
     const need = R.top + 1 - (s.bids[id] || 0);
-    if ((coins[id] || 0) >= need) return { turn: id };
+    if ((coins[id] || 0) >= need || (canB && canB(id))) return { turn: id };
     R.folded[id] = true;
     R.foldOrder.push(id);
     notes.push(nameOf(players, id) + " さんはコイン不足で降りました");
@@ -949,7 +1019,7 @@ function seatRaiseDone(s, winnerId) {
 }
 
 // 残りのグループを順に片づける。競り合いが始まれば {turn}、全部決まれば {pick}
-function seatAdvance(s, coins, notes, players) {
+function seatAdvance(s, coins, notes, players, canB) {
   for (;;) {
     const gr = s.groups.shift();
     if (!gr) return { pick: true };
@@ -958,14 +1028,14 @@ function seatAdvance(s, coins, notes, players) {
       continue;
     }
     const names = gr.map((id) => nameOf(players, id)).join("・");
-    if (!gr.some((id) => (coins[id] || 0) >= 1)) {
+    if (!gr.some((id) => (coins[id] || 0) >= 1 || (canB && canB(id)))) {
       shuffle(gr).forEach((id) => s.rank.push(id));
       notes.push(names + " は同点でコイン不足のため抽選");
       continue;
     }
     s.raise = { tied: gr, folded: {}, foldOrder: [], top: s.bids[gr[0]] };
     notes.push("同点!" + names + " で競り合い(" + s.bids[gr[0]] + "枚)");
-    const r = seatRaiseNext(s, coins, 0, notes, players);
+    const r = seatRaiseNext(s, coins, 0, notes, players, canB);
     if (r.turn) return { turn: r.turn };
     seatRaiseDone(s, r.done);
   }
@@ -999,6 +1069,7 @@ function cleanSeat(s) {
     if (!o.raise.foldOrder.length) delete o.raise.foldOrder;
   }
   if (!Object.keys(o.bids).length) delete o.bids;
+  if (!Object.keys(o.debtors).length) delete o.debtors;
   if (o.first === undefined) delete o.first;
   return o;
 }
@@ -1035,24 +1106,30 @@ function applySeat(room, act) {
     let n = 0;
     if (act.type === "sbid") {
       n = Math.floor(Number(act.n) || 0);
-      if (n < 1 || n > Math.min(SEAT_MAX, coins[uid])) return null;
+      // 借金ルールありなら、手持ちより多くても5枚まで選べる(足りない分は借金)
+      const cap = act.borrow && canBorrow(room, uid) ? SEAT_MAX : Math.min(SEAT_MAX, coins[uid]);
+      if (n < 1 || n > cap) return null;
     }
     s.bids[uid] = n;
     if (!s.need.every((id) => s.bids[id] !== undefined)) {
       upd["game/seat/bids/" + uid] = n;
       return upd;
     }
+    const god = [];
     s.need.forEach((id) => {
       if (s.bids[id] > 0) {
         pot += s.bids[id];
-        upd["players/" + id + "/coins"] = coins[id] - s.bids[id];
+        if (payCoins(upd, room, id, coins, s.bids[id]) > 0) {
+          s.debtors[id] = true;
+          god.push(nameOf(players, id));
+        }
       }
     });
     upd["game/pot"] = pot;
     s.stage = "open";
     s.id = Date.now();
     upd["game/seat"] = cleanSeat(s);
-    upd["game/notice"] = note("一斉公開!");
+    upd["game/notice"] = note("一斉公開!" + (god.length ? "\n" + god.join("・") + " さんが神の手を借りました" : ""));
     return upd;
   }
 
@@ -1061,16 +1138,39 @@ function applySeat(room, act) {
     if (uid !== g.turn || !s.raise) return null;
     const R = s.raise;
     const idx = R.tied.indexOf(uid);
+    const canB = (id) => canBorrow(room, id);
     if (act.type === "raise") {
       const pay = R.top + 1 - (s.bids[uid] || 0);
-      if (coins[uid] < pay) return null;
-      coins[uid] -= pay;
+      const newBorrow = coins[uid] < pay;
+      if (newBorrow && !(act.borrow && canB(uid))) return null;
+      const borrowed = payCoins(upd, room, uid, coins, pay);
       pot += pay;
       s.bids[uid] = R.top + 1;
       R.top += 1;
-      upd["players/" + uid + "/coins"] = coins[uid];
       upd["game/pot"] = pot;
-      notes.push(nameOf(players, uid) + " さん上乗せ → " + R.top + "枚");
+      if (newBorrow) {
+        s.debtors[uid] = true;
+        notes.push(nameOf(players, uid) + " さんが神の手を借りました!");
+      }
+      notes.push(nameOf(players, uid) + " さん上乗せ → " + R.top + "枚" + (borrowed ? "(借金+" + borrowed + ")" : ""));
+      // 強制終了: 競りに残っている全員が借金した → 最後に借りた人から
+      const alive = R.tied.filter((id) => !R.folded[id]);
+      if (newBorrow && alive.every((id) => s.debtors[id])) {
+        s.rank.push(uid);
+        alive.filter((id) => id !== uid).forEach((id) => s.rank.push(id));
+        R.foldOrder.slice().reverse().forEach((id) => s.rank.push(id));
+        s.raise = null;
+        notes.push(GOD_FORCE_SEAT);
+        const a = seatAdvance(s, coins, notes, players, canB);
+        if (a.turn) {
+          upd["game/seat"] = cleanSeat(s);
+          upd["game/turn"] = a.turn;
+          upd["game/notice"] = note(notes.join("\n"));
+          return upd;
+        }
+        seatToPick(upd, room, s, pot, notes);
+        return upd;
+      }
     } else if (act.type === "fold") {
       R.folded[uid] = true;
       R.foldOrder.push(uid);
@@ -1078,7 +1178,7 @@ function applySeat(room, act) {
     } else {
       return null;
     }
-    const r = seatRaiseNext(s, coins, idx + 1, notes, players);
+    const r = seatRaiseNext(s, coins, idx + 1, notes, players, canB);
     if (r.turn) {
       upd["game/seat"] = cleanSeat(s);
       upd["game/turn"] = r.turn;
@@ -1086,7 +1186,7 @@ function applySeat(room, act) {
       return upd;
     }
     seatRaiseDone(s, r.done);
-    const a = seatAdvance(s, coins, notes, players);
+    const a = seatAdvance(s, coins, notes, players, canB);
     if (a.turn) {
       upd["game/seat"] = cleanSeat(s);
       upd["game/turn"] = a.turn;
@@ -1151,7 +1251,7 @@ export function checkSeat(roomId, getRoom) {
       s.rank = [];
     }
     const upd = {};
-    const a = seatAdvance(s, coins, notes, players);
+    const a = seatAdvance(s, coins, notes, players, (id) => canBorrow(r, id));
     if (a.turn) {
       s.stage = "raise";
       upd["game/seat"] = cleanSeat(s);
@@ -1181,6 +1281,7 @@ export async function backToLobby(roomId, room) {
     upd["players/" + id + "/debtTotal"] = null;
     upd["players/" + id + "/seat"] = null;
     upd["players/" + id + "/exitRound"] = null;
+    upd["players/" + id + "/exitReason"] = null;
   });
   await update(ref(db, "rooms/" + roomId), upd);
 }

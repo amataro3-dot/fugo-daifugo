@@ -68,14 +68,21 @@ export function cpuRaise(hand, coins, pay) {
 }
 
 // カードチェンジ: 反則負けになりそうな札を替える。コインに余裕がなければパス
-export function cpuChange(hand, count, coins) {
+export function cpuChange(hand, count, coins, canBorrow) {
   const pass = { type: "cpass", cards: [] };
   const cost = Math.pow(2, count);
-  if (count >= 3 || coins < cost) return pass;
+  if (count >= 3) return pass;
   const bad = hand.filter((c) => isForbidden(c, false));
   const badNoJoker = bad.filter((c) => !isJoker(c));
   const allBad = hand.length > 0 && bad.length === hand.length;
   const change = (c) => ({ type: "change", cards: [c] });
+  if (coins < cost) {
+    // コイン不足: 上がり禁止カードしかないときだけ、神の手を借りてチェンジ
+    if (allBad && canBorrow && coins >= 1) {
+      return { type: "change", cards: [badNoJoker[0] || bad[0]], borrow: true };
+    }
+    return pass;
+  }
   if (allBad) return change(badNoJoker[0] || bad[0]);
   if (coins < cost + 5) return pass;
   if (badNoJoker.length && Math.random() < 0.7) return change(badNoJoker[0]);
@@ -91,4 +98,9 @@ export function cpuSeatBid(coins, max) {
   const cap = Math.min(max, coins);
   if (cap < 1 || coins < 6 || Math.random() < 0.3) return { type: "spass" };
   return { type: "sbid", n: Math.min(cap, 1 + Math.floor(Math.random() * 2)) };
+}
+
+// 親決めの競り上げで、神の手を借りて(借金して)上乗せするか: 親になれば即上がりのときだけ
+export function cpuBorrowRaise(hand) {
+  return instantWin(hand);
 }

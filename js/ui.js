@@ -10,6 +10,33 @@ let winDone = null;
 let lastArgs = null;
 let lastFieldKey = "";
 let bidPick = 1;
+let curSettings = {};
+
+const GOD_ASK = "次のターンからマイナスになります。\n富豪の神の手を借りますか?";
+
+// 神の手を借りられるか(借金ルールあり、かつ、このゲームでまだ使っていない)
+function canBorrowMe(p) {
+  return curSettings.debt === "on" && !!p && !((p.debtTotal || 0) > 0);
+}
+
+// 自分の名前の前に「貧」マークを付ける
+function addPoor(el, p) {
+  if (!(p && p.debt > 0)) return;
+  const t = el.textContent;
+  el.textContent = "";
+  el.appendChild(poorMark());
+  el.appendChild(document.createTextNode(t));
+}
+
+// 丸で囲んだ「貧」マーク(借金中の人)
+function poorMark() {
+  const m = document.createElement("span");
+  m.textContent = "貧";
+  m.style.cssText =
+    "display:inline-block;width:18px;height:18px;line-height:16px;border:1.5px solid #ff8a8a;" +
+    "border-radius:50%;font-size:11px;color:#ff8a8a;text-align:center;margin-right:3px;vertical-align:middle";
+  return m;
+}
 let bidRound = null;
 
 // jsuit: ジョーカーを何のマークとして出したか(場のカード用)
@@ -53,7 +80,8 @@ function seatEl(id, p, count, game, openHand, hand) {
   const nm = document.createElement("div");
   nm.className = "nm";
   nm.style.fontSize = "15px";
-  nm.textContent = (p.debt > 0 ? "㊎ " : "") + p.name;
+  if (p.debt > 0) nm.appendChild(poorMark());
+  nm.appendChild(document.createTextNode(p.name));
   const coin = document.createElement("div");
   coin.className = "coin";
   coin.style.fontSize = "15px";
@@ -158,7 +186,9 @@ function renderFinal(root, g, onAction) {
     const right = document.createElement("span");
     let txt = "🪙" + x.coins;
     if (x.debtTotal > 0) txt += "(借金-" + x.debtTotal + " → " + x.score + ")";
-    if (x.exitRound) txt += "  退場(第" + x.exitRound + "ラウンド)";
+    if (x.exitRound) {
+      txt += "  退場(第" + x.exitRound + "ラウンド" + (x.exitReason === "debt" ? "・借金" : "") + ")";
+    }
     right.textContent = txt;
     row.appendChild(left);
     row.appendChild(right);
@@ -185,6 +215,7 @@ function showResult(g, players, onAction) {
   const w = r.winner ? players[r.winner] : null;
   add(w ? "🎉 " + w.name + " さんの勝ち!" : "ノーゲーム");
   if (r.gain > 0) add("ポット " + r.gain + " 枚を獲得", "rs");
+  if (r.repaid) add("神の手の借金 " + r.repaid + " 枚を先に返済", "rs");
   else if (r.carry > 0) add("ポット " + r.carry + " 枚は次のラウンドへ持ち越し", "rs");
   else add("ポットは 0 枚", "rs");
   // コインが多い人の順に並べる(同じ枚数は同じ順位)
@@ -199,8 +230,11 @@ function showResult(g, players, onAction) {
     add(line, "rs");
   });
   if (r.outIds && r.outIds.length) {
-    const names = r.outIds.map((id) => (players[id] ? players[id].name : "")).join("、");
-    add("コインが0枚の " + names + " は退場(観戦になります)", "rs warn");
+    const nm = (id) => (players[id] ? players[id].name : "");
+    const debtOut = r.outIds.filter((id) => players[id] && players[id].debt > 0);
+    const zeroOut = r.outIds.filter((id) => !debtOut.includes(id));
+    if (zeroOut.length) add("コインが0枚の " + zeroOut.map(nm).join("、") + " は退場(観戦になります)", "rs warn");
+    if (debtOut.length) add("借金を返せなかった " + debtOut.map(nm).join("、") + " は退場(観戦になります)", "rs warn");
   }
   if (r.last) add("これで対戦は終了です", "rs warn");
   const b = document.createElement("button");
@@ -293,18 +327,32 @@ function bidStepper(root, cap, key, goLabel, onGo) {
 }
 
 // 競り上げの「上乗せ / 降りる」ボタン(親決め・席決めで共通)
-function raiseButtons(root, msg, top, myBid, coins, onAction) {
+// debtor: この競りですでに神の手を借りている(何枚でも上げられる)
+// canB: まだ神の手を借りられる
+function raiseButtons(root, msg, top, myBid, coins, onAction, debtor, canB) {
   const pay = top + 1 - (myBid || 0);
-  msg.textContent = "上乗せすると合計 " + (top + 1) + "枚(今回 " + pay + "枚払う)";
+  const short = (coins || 0) < pay;
+  msg.textContent = "上乗せすると合計 " + (top + 1) + "枚(今回 " + pay + "枚払う)" +
+    (short && debtor ? "\n足りない分は借金になります" : "") +
+    (short && !debtor && canB ? "\nコインが足りません。神の手を借りれば上乗せできます" : "");
   const btns = document.createElement("div");
   btns.className = "g-btns";
   const up = document.createElement("button");
   up.className = "btn main";
-  up.textContent = "上乗せ(+" + pay + "枚)";
-  up.disabled = (coins || 0) < pay;
-  up.onclick = () => {
+  up.textContent = !short ? "上乗せ(+" + pay + "枚)"
+    : debtor ? "上乗せ(借金で+" + pay + ")"
+    : "神の手で上乗せ";
+  up.disabled = short && !debtor && !canB;
+  up.onclick = async () => {
+    if (short && !debtor) {
+      const ok = await askChoice(GOD_ASK, [
+        { label: "借りる", value: "yes" },
+        { label: "借りない", value: "no" }
+      ]);
+      if (ok !== "yes") return;
+    }
     up.disabled = true;
-    onAction({ type: "raise" });
+    onAction({ type: "raise", borrow: short });
   };
   const fold = document.createElement("button");
   fold.className = "btn";
@@ -359,7 +407,8 @@ function bidControls(root, g, me, uid, maxBid, onAction) {
     msg.textContent = "相手の番です(今 " + b.top + "枚)";
     return;
   }
-  raiseButtons(root, msg, b.top, bids[uid], me.coins, onAction);
+  raiseButtons(root, msg, b.top, bids[uid], me.coins, onAction,
+    !!(b.debtors && b.debtors[uid]), canBorrowMe(me));
 }
 
 // ===== 席決めオークション =====
@@ -467,9 +516,23 @@ function seatControls(root, g, me, uid, players, onAction) {
       msg.textContent = (bids[uid] > 0 ? "入札済み(" + bids[uid] + "枚)" : "パスしました") + "。全員を待っています";
       return;
     }
-    const cap = Math.min(5, me.coins || 0);
+    const borrowOk = canBorrowMe(me);
+    const cap = borrowOk ? 5 : Math.min(5, me.coins || 0);
     msg.textContent = "席を選ぶ順番の入札(1〜" + cap + "枚)\n多い人から好きな席を選べます。パスは余った席にランダム";
-    bidStepper(root, cap, "s" + g.round, "入札する", (n) => onAction({ type: "sbid", n }));
+    let goBtn = null;
+    goBtn = bidStepper(root, cap, "s" + g.round, "入札する", async (n) => {
+      if (n > (me.coins || 0)) {
+        // 手持ちより多い → 神の手の確認。「借りない」ならパス
+        const ok = await askChoice(GOD_ASK + "\n(足りない " + (n - (me.coins || 0)) + " 枚を借ります)", [
+          { label: "借りる", value: "yes" },
+          { label: "借りない(パス)", value: "no" }
+        ]);
+        if (ok === "yes") onAction({ type: "sbid", n, borrow: true });
+        else onAction({ type: "spass" });
+        return;
+      }
+      onAction({ type: "sbid", n });
+    });
     const ps = document.createElement("button");
     ps.className = "btn";
     ps.textContent = "パス(余った席にランダム)";
@@ -494,7 +557,7 @@ function seatControls(root, g, me, uid, players, onAction) {
       msg.textContent = "相手の番です(今 " + R.top + "枚)";
       return;
     }
-    raiseButtons(root, msg, R.top, bids[uid], me.coins, onAction);
+    raiseButtons(root, msg, R.top, bids[uid], me.coins, onAction, false, canBorrowMe(me));
     return;
   }
   // 席を選ぶ
@@ -556,6 +619,7 @@ function renderSeatPhase(root, g, players, uid, spectator, onAction) {
   info.textContent =
     me.name + "  🪙" + me.coins + (mySlot >= 0 ? "" : "  (未着席)") +
     (g.turn === uid ? "  ← あなたの番" : "");
+  addPoor(info, me);
   root.appendChild(info);
   seatControls(root, g, me, uid, players, onAction);
 }
@@ -577,6 +641,7 @@ function splitLayout(others) {
 
 export function renderGame(root, room, uid, onLeave, onAction) {
   lastArgs = [root, room, uid, onLeave, onAction];
+  curSettings = room.settings || {};
   const g = room.game || {};
   const players = room.players || {};
   const hands = room.hands || {};
@@ -772,6 +837,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     (g.out && g.out[uid] ? "  【反則負け】" : "") +
     (g.passed && g.passed[uid] ? "  【パス】" : "") +
     (myTurn ? "  ← あなたの番" : "");
+  addPoor(info, me);
   root.appendChild(info);
   if (myHand.length && myHand.every((c) => isForbidden(c, !!g.rev))) {
     const w = document.createElement("div");
@@ -818,7 +884,9 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     const cnt = (ch.counts && ch.counts[uid]) || 0;
     const cost = Math.pow(2, cnt);
     const fin = !!(ch.done && ch.done[uid]);
-    const canChange = myTurn && !fin && cnt < 3 && (me.coins || 0) >= cost;
+    const short = (me.coins || 0) < cost;
+    const borrowOk = short && (me.coins || 0) >= 1 && canBorrowMe(me);
+    const canChange = myTurn && !fin && cnt < 3 && (!short || borrowOk);
     if (myTurn) {
       msg.textContent = "替えるカードを1枚選んでください(コスト " + cost + " コイン)";
     } else if (fin || cnt >= 3) {
@@ -828,14 +896,24 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     }
     const chBtn = document.createElement("button");
     chBtn.className = "btn main";
-    chBtn.textContent = "チェンジ(" + cost + "コイン)";
+    chBtn.textContent = "チェンジ(" + cost + "コイン)" + (borrowOk ? "・神の手" : "");
     chBtn.disabled = !canChange;
-    chBtn.onclick = () => {
+    chBtn.onclick = async () => {
       if (selected.length !== 1) {
         msg.textContent = "替えるカードを1枚選んでください";
         return;
       }
       const card = selected[0];
+      if (short) {
+        const ok = await askChoice(GOD_ASK + "\n(足りない " + (cost - (me.coins || 0)) + " 枚を借ります)", [
+          { label: "借りる", value: "yes" },
+          { label: "借りない(パス)", value: "no" }
+        ]);
+        selected = [];
+        if (ok === "yes") onAction({ type: "change", cards: [card], borrow: true });
+        else onAction({ type: "cpass" });
+        return;
+      }
       selected = [];
       onAction({ type: "change", cards: [card] });
     };
