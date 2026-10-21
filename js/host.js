@@ -1,4 +1,4 @@
-import { db, ref, update, set } from "./firebase.js";
+import { db, ref, update, set, serverNow } from "./firebase.js";
 import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
   canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
@@ -20,8 +20,159 @@ function draw(state, n) {
   return out;
 }
 
+// 手札から、指定したカードを1枚ずつ抜く
+// (ロットが変わると同じカードが2枚あることがあるので、同じ札を全部消さないように)
+function removeCards(hand, cards) {
+  const rest = hand.slice();
+  cards.forEach((c) => {
+    const i = rest.indexOf(c);
+    if (i >= 0) rest.splice(i, 1);
+  });
+  return rest;
+}
+
 function note(text) {
   return { text, id: Date.now() };
+}
+
+// ===== 切断・リタイヤ =====
+
+const WAIT_MS = 3 * 60 * 1000; // 切断から3分でリタイヤ
+
+function isRetired(room, upd, id) {
+  if (upd && upd["players/" + id + "/retired"]) return true;
+  const p = (room.players || {})[id];
+  return !!(p && p.retired);
+}
+
+// 接続が切れている対戦者(この人たちが戻るまで、ゲーム全体を止める)
+export function waitingIds(room) {
+  const g = room && room.game;
+  if (!g || !room.meta || !room.meta.started || g.phase === "final") return [];
+  const players = room.players || {};
+  return (g.order || []).filter((id) => {
+    const p = players[id];
+    return p && !p.cpu && !p.retired && p.online === false;
+  });
+}
+function paused(room) {
+  return waitingIds(room).length > 0;
+}
+
+// リタイヤさせる(3分たった切断 / 自分で退出)
+function retirePlayer(room, id, upd, notes) {
+  const g = room.game;
+  const players = room.players || {};
+  const order = g.order || [];
+  const c = coinsOf(room, upd, id);
+  upd["players/" + id + "/retired"] = true;
+  upd["players/" + id + "/spectator"] = true;
+  upd["players/" + id + "/exitRound"] = g.round;
+  upd["players/" + id + "/exitReason"] = "retire";
+  upd["players/" + id + "/coins"] = Math.min(c, 0);
+  const carry = Math.max(c, 0);
+  if (carry > 0) upd["game/carryNext"] = (g.carryNext || 0) + carry;
+  notes.push(nameOf(players, id) + " さんがリタイヤしました" +
+    (carry > 0 ? "\nコイン" + carry + "枚は次のラウンドのポットへ" : ""));
+
+  // 残りの対戦者が1人以下 → その人がラウンドの勝者(いなければノーゲーム)
+  const outNow = Object.assign({}, g.out || {}, { [id]: true });
+  const alive = order.filter((x) => !isRetired(room, upd, x) && !(g.phase === "play" && outNow[x]));
+  if (g.phase !== "result" && alive.length <= 1) {
+    if (g.phase === "play") upd["hands/" + id] = null;
+    upd["game/out/" + id] = true;
+    upd["game/phase"] = "result";
+    upd["game/winner"] = alive[0] || null;
+    upd["game/turn"] = null;
+    ["bid", "seat", "market", "change", "clear", "foul"].forEach((k) => {
+      upd["game/" + k] = null;
+    });
+    notes.push(alive[0] ? "残り1人になったため " + nameOf(players, alive[0]) + " さんの勝ち!" : "ノーゲーム");
+    return;
+  }
+
+  // どのフェーズでも「脱落」の印を付けて、手札を捨てる(このラウンドで手番が回らないように)
+  upd["game/out/" + id] = true;
+  upd["hands/" + id] = null;
+  if (g.phase === "play") {
+    // 反則負けと同じく、手札を捨てて脱落
+    upd["hands/" + id] = null;
+    curOut = outNow;
+    if (g.turn === id) {
+      const idx = order.indexOf(id);
+      const next = nextPlayer(order, g.passed || {}, idx);
+      if (g.field && (next === null || next === g.last)) {
+        flushTo(upd, room, g, g.last);
+      } else {
+        upd["game/turn"] = next;
+        if (!g.field) upd["game/last"] = next;
+      }
+    }
+  } else if (g.phase === "change") {
+    upd["game/change/done/" + id] = true;
+    if (g.turn === id) {
+      const ch = g.change || {};
+      const done = Object.assign({}, ch.done || {}, { [id]: true });
+      const coins = {};
+      order.forEach((x) => {
+        coins[x] = coinsOf(room, upd, x);
+      });
+      const next = pickChanger(order, order.indexOf(id), ch.counts || {}, done, coins,
+        (x) => canBorrow(room, x, upd) && !isRetired(room, upd, x));
+      if (next) upd["game/turn"] = next;
+      else {
+        upd["game/change"] = null;
+        startBid(pathSetter(upd), room, upd, order, "", g.lead);
+      }
+    }
+  }
+  // 入札・席決め・マーケットは、リタイヤした人を自動でパスさせる(maybeCpu の仕組み)
+}
+
+// 場を流して、次の人から(その人が脱落していたら、席順で次の人)
+function flushTo(upd, room, g, who) {
+  const order = g.order || [];
+  let start = who;
+  if (curOut[who]) start = nextPlayer(order, {}, order.indexOf(who));
+  upd["game/field"] = null;
+  upd["game/passed"] = null;
+  upd["game/rev"] = false;
+  upd["game/lock"] = null;
+  upd["game/turn"] = start;
+  upd["game/last"] = start;
+  return start;
+}
+
+// 切断の見張り(ホストが毎秒呼ぶ): 3分たったらリタイヤ。自分で退出した人もリタイヤ
+let retiring = false;
+export async function checkDisconnect(roomId, getRoom) {
+  if (retiring) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || !room.meta || !room.meta.started || g.phase === "final") return;
+  const players = room.players || {};
+  const now = serverNow();
+  const upd = {};
+  const notes = [];
+  let r = room;
+  for (const id of g.order || []) {
+    const p = players[id];
+    if (!p || p.cpu || p.retired) continue;
+    const gone = p.leaveReq || (p.online === false && p.offAt && now - p.offAt >= WAIT_MS);
+    if (p.online === false && !p.offAt && !p.leaveReq) upd["players/" + id + "/offAt"] = now;
+    if (gone) {
+      retirePlayer(r, id, upd, notes);
+      break; // 1人ずつ処理する
+    }
+  }
+  if (!Object.keys(upd).length) return;
+  if (notes.length) upd["game/notice"] = note(notes.join("\n"));
+  retiring = true;
+  try {
+    await update(ref(db, "rooms/" + roomId), upd);
+  } finally {
+    retiring = false;
+  }
 }
 
 // ===== 借金ルール「富豪の神の手」の共通部分 =====
@@ -178,7 +329,7 @@ function applyChange(room, act) {
     if (!card || !hand.includes(card)) return null;
     const state = { deck: (room.deck || []).slice(), lot: room.lot || 1, notice: "" };
     const nc = draw(state, 1)[0];
-    upd["hands/" + uid] = hand.filter((c) => c !== card).concat([nc]);
+    upd["hands/" + uid] = removeCards(hand, [card]).concat([nc]);
     upd["deck"] = state.deck.length ? state.deck : null;
     upd["lot"] = state.lot;
     const borrowed = payCoins(upd, room, uid, coinsNow, cost);
@@ -252,7 +403,8 @@ function goPlay(upd, parent, text) {
 function startBid(setG, room, upd, order, lotNote, lead) {
   const players = room.players || {};
   const head = lotNote ? lotNote + "\n" : "";
-  const need = order.filter((id) => coinsOf(room, upd, id) >= 1 || canBorrow(room, id, upd));
+  const need = order.filter((id) => !isRetired(room, upd, id) &&
+    (coinsOf(room, upd, id) >= 1 || canBorrow(room, id, upd)));
   if (need.length === 0) {
     const p = lead || order[0];
     goPlayS(setG, p, head + "入札できる人がいないため\n" + nameOf(players, p) + " さんから");
@@ -326,7 +478,7 @@ function applyBid(room, act) {
       // 手持ちより多いときは、神の手を借りる(このゲームでまだ使っていない人だけ)
       const cap = act.borrow && canBorrow(room, uid) ? max : Math.min(max, coins[uid]);
       if (n < 1 || n > cap) return null;
-    } else if (coins[uid] >= 1) {
+    } else if (coins[uid] >= 1 && !isRetired(room, null, uid)) {
       return null; // パスできるのは、コインがなくて神の手を借りなかった人だけ
     }
     bids[uid] = n;
@@ -430,13 +582,13 @@ export function checkBid(roomId, getRoom) {
   if (bidTimer) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || g.phase !== "bid" || !g.bid || g.bid.stage !== "open") return;
+  if (!g || g.phase !== "bid" || !g.bid || g.bid.stage !== "open" || paused(room)) return;
   const openId = g.bid.id;
   bidTimer = setTimeout(async () => {
     bidTimer = null;
     const r = getRoom();
     const gg = r && r.game;
-    if (!gg || gg.phase !== "bid" || !gg.bid || gg.bid.stage !== "open" || gg.bid.id !== openId) return;
+    if (!gg || gg.phase !== "bid" || !gg.bid || gg.bid.stage !== "open" || gg.bid.id !== openId || paused(r)) return;
     const b = gg.bid;
     const players = r.players || {};
     const upd = {};
@@ -504,12 +656,8 @@ function applyAction(room, act) {
     const passed = Object.assign({}, g.passed || {}, { [uid]: true });
     const next = nextPlayer(order, passed, idx);
     if (next === g.last || next === null) {
-      const lp = room.players[g.last];
-      upd["game/field"] = null;
-      upd["game/passed"] = null;
-      upd["game/rev"] = false;
-      upd["game/lock"] = null;
-      upd["game/turn"] = g.last;
+      const who = flushTo(upd, room, g, g.last);
+      const lp = room.players[who];
       upd["game/notice"] = note(
         "全員パスで場が流れます\n" + (lp ? lp.name : "") + " さんから"
       );
@@ -530,7 +678,7 @@ function applyAction(room, act) {
 
     // スペ3返し
     if (canSpe3(field, lockNow, cards)) {
-      const rest0 = hand.filter((c) => !cards.includes(c));
+      const rest0 = removeCards(hand, cards);
       upd["hands/" + uid] = rest0.length ? rest0 : null;
       upd["game/last"] = uid;
       upd["game/passed"] = null;
@@ -630,7 +778,7 @@ function applyAction(room, act) {
       }
     }
 
-    const rest = hand.filter((c) => !cards.includes(c));
+    const rest = removeCards(hand, cards);
     const eight = hasNum(cards, 8);
     const jack = hasNum(cards, 11);
     const newRev = jack ? true : rev;
@@ -689,7 +837,7 @@ export async function processActions(roomId, getRoom) {
   try {
     for (let guard = 0; guard < 50; guard++) {
       const room = getRoom();
-      if (!room || !room.actions) break;
+      if (!room || !room.actions || paused(room)) break;
       const key = Object.keys(room.actions).sort()[0];
       const act = room.actions[key];
       const upd = applyAction(room, act) || {};
@@ -706,7 +854,7 @@ export function maybeCpu(roomId, getRoom) {
   if (cpuTimer) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || room.actions || g.foul || g.clear) return;
+  if (!g || room.actions || g.foul || g.clear || paused(room)) return;
   if (g.phase === "bid") return maybeCpuBid(roomId, getRoom);
   if (g.phase === "seat") return maybeCpuSeat(roomId, getRoom);
   if (g.phase === "market") return maybeCpuMarket(roomId, getRoom);
@@ -720,7 +868,7 @@ export function maybeCpu(roomId, getRoom) {
     const r = getRoom();
     if (!r || !r.game) return;
     const gg = r.game;
-    if (gg.phase !== phase || gg.turn !== turn || gg.foul || gg.clear || r.actions) {
+    if (gg.phase !== phase || gg.turn !== turn || gg.foul || gg.clear || r.actions || paused(r)) {
       maybeCpu(roomId, getRoom);
       return;
     }
@@ -736,6 +884,12 @@ export function maybeCpu(roomId, getRoom) {
   }, 1500);
 }
 
+// 自動で動かす人(コンピューター、またはリタイヤした人)
+function isBot(room, id) {
+  const p = room.players && room.players[id];
+  return !!(p && (p.cpu || p.retired));
+}
+
 // コンピューターの入札(伏せ入札は1人ずつ、競り上げは自分の番に)
 function maybeCpuBid(roomId, getRoom) {
   const room = getRoom();
@@ -745,10 +899,9 @@ function maybeCpuBid(roomId, getRoom) {
   let who = null;
   if (b.stage === "blind") {
     const bids = b.bids || {};
-    who = (b.need || []).find((id) => bids[id] === undefined && room.players[id] && room.players[id].cpu) || null;
+    who = (b.need || []).find((id) => bids[id] === undefined && isBot(room, id)) || null;
   } else if (b.stage === "raise") {
-    const p = room.players[g.turn];
-    if (p && p.cpu) who = g.turn;
+    if (isBot(room, g.turn)) who = g.turn;
   }
   if (!who) return;
   const stage = b.stage;
@@ -763,6 +916,11 @@ function maybeCpuBid(roomId, getRoom) {
     }
     const hand = (r.hands && r.hands[who]) || [];
     const coins = (r.players[who] && r.players[who].coins) || 0;
+    if (r.players[who] && r.players[who].retired) {
+      // リタイヤした人は自動でパス / 降りる
+      sendAction(roomId, who, { type: stage === "blind" ? "bpass" : "fold" });
+      return;
+    }
     if (stage === "blind") {
       if ((gg.bid.bids || {})[who] !== undefined) return maybeCpu(roomId, getRoom);
       const max = (r.settings && r.settings.bidMax) || 5;
@@ -794,7 +952,7 @@ function maybeCpuSeat(roomId, getRoom) {
   const g = room.game;
   const s = g.seat;
   if (!s) return;
-  const isCpu = (id) => room.players[id] && room.players[id].cpu;
+  const isCpu = (id) => isBot(room, id);
   let who = null;
   if (s.stage === "blind") {
     const bids = s.bids || {};
@@ -815,6 +973,10 @@ function maybeCpuSeat(roomId, getRoom) {
     }
     const ss = gg.seat;
     const coins = (r.players[who] && r.players[who].coins) || 0;
+    if (r.players[who] && r.players[who].retired && stage !== "pick") {
+      sendAction(roomId, who, { type: stage === "blind" ? "spass" : "fold" });
+      return;
+    }
     if (stage === "blind") {
       sendAction(roomId, who, cpuSeatBid(coins, SEAT_MAX));
     } else if (stage === "raise") {
@@ -833,7 +995,7 @@ function maybeCpuMarket(roomId, getRoom) {
   const g = room.game;
   const m = g.market;
   if (!m) return;
-  const isCpu = (id) => room.players[id] && room.players[id].cpu;
+  const isCpu = (id) => isBot(room, id);
   let who = null;
   if (m.stage === "blind") {
     const bets = m.bets || {};
@@ -855,6 +1017,10 @@ function maybeCpuMarket(roomId, getRoom) {
     const mm = gg.market;
     const hand = (r.hands && r.hands[who]) || [];
     const coins = (r.players[who] && r.players[who].coins) || 0;
+    if (r.players[who] && r.players[who].retired) {
+      sendAction(roomId, who, { type: stage === "blind" ? "mpass" : stage === "swap" ? "mswap" : "fold" });
+      return;
+    }
     if (stage === "blind") {
       const avail = (mm.avail || []).filter((c) => !(mm.sold && mm.sold["c" + c]));
       sendAction(roomId, who, cpuMarketBet(hand, mm.cards || [], avail, coins));
@@ -874,19 +1040,27 @@ export function checkClear(roomId, getRoom) {
   if (clearTimer) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || !g.clear || g.phase !== "play") return;
+  if (!g || !g.clear || g.phase !== "play" || paused(room)) return;
   const c = g.clear;
   clearTimer = setTimeout(async () => {
     clearTimer = null;
     const r = getRoom();
-    if (!r || !r.game || !r.game.clear || r.game.clear.id !== c.id) return;
+    if (!r || !r.game || !r.game.clear || r.game.clear.id !== c.id || paused(r)) return;
+    const out = r.game.out || {};
+    const order = r.game.order || [];
+    let t = c.turn;
+    if (out[t]) {
+      curOut = out;
+      t = nextPlayer(order, {}, order.indexOf(t));
+    }
     await update(ref(db, "rooms/" + roomId + "/game"), {
       field: null,
       passed: null,
       rev: false,
       lock: null,
       clear: null,
-      turn: c.turn
+      turn: t,
+      last: t
     });
   }, 1500);
 }
@@ -898,7 +1072,7 @@ export async function settle(roomId, getRoom) {
   if (settling) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || g.phase !== "result" || g.result) return;
+  if (!g || g.phase !== "result" || g.result || paused(room)) return;
   settling = true;
   try {
     const players = room.players || {};
@@ -920,8 +1094,9 @@ export async function settle(roomId, getRoom) {
         if (coinsAfter[winner] > 0) upd["players/" + winner + "/debt"] = 0;
       }
     }
-    const outIds = g.order.filter((id) => coinsAfter[id] <= 0);
-    const remaining = g.order.filter((id) => coinsAfter[id] > 0);
+    const ret = (id) => players[id] && players[id].retired;
+    const outIds = g.order.filter((id) => !ret(id) && coinsAfter[id] <= 0);
+    const remaining = g.order.filter((id) => !ret(id) && coinsAfter[id] > 0);
     const last = remaining.length <= 1 || g.round >= room.settings.rounds;
     const result = {
       gain: winner ? pot : 0,
@@ -949,7 +1124,7 @@ export async function checkResultAcks(roomId, getRoom) {
   if (advancing) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || g.phase !== "result" || !g.result) return;
+  if (!g || g.phase !== "result" || !g.result || paused(room)) return;
   const acks = g.result.acks || {};
   const need = Object.entries(room.players || {})
     .filter(([id, p]) => !p.cpu && !p.spectator && p.online !== false && (g.order || []).includes(id))
@@ -977,6 +1152,8 @@ async function nextRound(roomId, room) {
   const players = Object.assign({}, room.players || {});
   const rr = g.round;
   const upd = {};
+  // リタイヤした人のコインは、次のラウンドのポットへ
+  const potNext = (g.pot || 0) + (g.carryNext || 0);
 
   const exit = {};
   Object.entries(players).forEach(([id, p]) => {
@@ -984,6 +1161,10 @@ async function nextRound(roomId, room) {
   });
   g.order.forEach((id) => {
     const c = (players[id] && players[id].coins) || 0;
+    if (players[id] && players[id].retired) {
+      exit[id] = players[id].exitRound || rr;
+      return;
+    }
     if (c <= 0) {
       exit[id] = rr;
       upd["players/" + id + "/exitRound"] = rr;
@@ -1021,7 +1202,7 @@ async function nextRound(roomId, room) {
       if (x.exitRound && why) o.exitReason = why;
       return o;
     });
-    upd["game"] = { round: rr, phase: "final", pot: g.pot || 0, order: g.order, ranking };
+    upd["game"] = { round: rr, phase: "final", pot: potNext, order: g.order, ranking };
     await update(ref(db, "rooms/" + roomId), upd);
     return;
   }
@@ -1034,10 +1215,10 @@ async function nextRound(roomId, room) {
   if (remaining.length >= 3) {
     const s = startSeat(room, g, remaining);
     if (s.need.length === 0) {
-      finishSeats(upd, room, s, rr + 1, g.pot || 0);
+      finishSeats(upd, room, s, rr + 1, potNext);
     } else {
       upd["game"] = {
-        round: rr + 1, phase: "seat", pot: g.pot || 0, order: remaining, seat: s,
+        round: rr + 1, phase: "seat", pot: potNext, order: remaining, seat: s,
         notice: note("席決めオークション!\n" + (s.first ? "前回の勝者が先に座ります\n" : "") + "入札するかパスを選んでください")
       };
     }
@@ -1051,7 +1232,7 @@ async function nextRound(roomId, room) {
   if (wi > 0) newOrder = newOrder.slice(wi).concat(newOrder.slice(0, wi));
   const w2 = g.result && g.result.winner && newOrder.includes(g.result.winner) ? g.result.winner : null;
   dealAndMarket(upd, room, newOrder, w2 || newOrder[Math.floor(Math.random() * newOrder.length)],
-    rr + 1, g.pot || 0, "", w2);
+    rr + 1, potNext, "", w2);
   await update(ref(db, "rooms/" + roomId), upd);
 }
 
@@ -1063,6 +1244,11 @@ function dealAndMarket(upd, room, order, lead, round, pot, text, prevWinner) {
     if (k.startsWith("game/")) delete upd[k];
   });
   const players = room.players || {};
+  // 席決めの途中でリタイヤした人を外す(そのコインは、このラウンドのポットへ)
+  order = order.filter((id) => !isRetired(room, upd, id));
+  if (!order.includes(lead)) lead = order[Math.floor(Math.random() * order.length)];
+  if (prevWinner && !order.includes(prevWinner)) prevWinner = null;
+  if (room.game && room.game.phase === "seat" && room.game.carryNext) pot += room.game.carryNext;
   const state = { deck: (room.deck || []).slice(), lot: room.lot || 1, notice: "" };
   order.forEach((id) => {
     upd["hands/" + id] = draw(state, 3);
@@ -1150,7 +1336,8 @@ function normMarket(m) {
 function marketNeed(room, upd, order, lead, debtors) {
   const li = Math.max(order.indexOf(lead), 0);
   const rot = order.slice(li).concat(order.slice(0, li));
-  return rot.filter((id) => coinsOf(room, upd, id) >= 1 || (canBorrow(room, id, upd) && !debtors[id]));
+  return rot.filter((id) => !isRetired(room, upd, id) &&
+    (coinsOf(room, upd, id) >= 1 || (canBorrow(room, id, upd) && !debtors[id])));
 }
 
 function cardName(c) {
@@ -1353,8 +1540,12 @@ function applyMarket(room, act) {
     if (act.type !== "mswap" || !a || a.w !== uid || G.turn !== uid) return null;
     const hand = (room.hands && room.hands[uid]) || [];
     const card = (act.cards || [])[0];
-    if (!card || !hand.includes(card)) return null;
-    upd["hands/" + uid] = hand.filter((x) => x !== card).concat([m.cards[a.c]]);
+    if (isRetired(room, null, uid)) {
+      // リタイヤした人が獲得していたカードは、そのまま捨て札
+    } else {
+      if (!card || !hand.includes(card)) return null;
+      upd["hands/" + uid] = removeCards(hand, [card]).concat([m.cards[a.c]]);
+    }
     m.sold["c" + a.c] = uid;
     m.awards.shift();
     notes.push(nameOf(players, uid) + " さんが交換しました");
@@ -1375,13 +1566,13 @@ export function checkMarket(roomId, getRoom) {
   if (marketTimer) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || g.phase !== "market" || !g.market || g.market.stage !== "open") return;
+  if (!g || g.phase !== "market" || !g.market || g.market.stage !== "open" || paused(room)) return;
   const openId = g.market.id;
   marketTimer = setTimeout(async () => {
     marketTimer = null;
     const r = getRoom();
     const gg = r && r.game;
-    if (!gg || gg.phase !== "market" || !gg.market || gg.market.stage !== "open" || gg.market.id !== openId) return;
+    if (!gg || gg.phase !== "market" || !gg.market || gg.market.stage !== "open" || gg.market.id !== openId || paused(r)) return;
     const G = clone(gg);
     const m = normMarket(G.market);
     const players = r.players || {};
@@ -1700,13 +1891,13 @@ export function checkSeat(roomId, getRoom) {
   if (seatTimer) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || g.phase !== "seat" || !g.seat || g.seat.stage !== "open") return;
+  if (!g || g.phase !== "seat" || !g.seat || g.seat.stage !== "open" || paused(room)) return;
   const openId = g.seat.id;
   seatTimer = setTimeout(async () => {
     seatTimer = null;
     const r = getRoom();
     const gg = r && r.game;
-    if (!gg || gg.phase !== "seat" || !gg.seat || gg.seat.stage !== "open" || gg.seat.id !== openId) return;
+    if (!gg || gg.phase !== "seat" || !gg.seat || gg.seat.stage !== "open" || gg.seat.id !== openId || paused(r)) return;
     const s = normSeat(gg.seat);
     const players = r.players || {};
     const coins = {};
@@ -1746,7 +1937,8 @@ export async function backToLobby(roomId, room) {
     "meta/started": false
   };
   Object.entries((room && room.players) || {}).forEach(([id, p]) => {
-    if (p.cpu) {
+    // コンピューターと、ゲーム中に退出した人は、部屋から外す
+    if (p.cpu || p.leaveReq) {
       upd["players/" + id] = null;
       return;
     }
@@ -1758,6 +1950,8 @@ export async function backToLobby(roomId, room) {
     upd["players/" + id + "/seat"] = null;
     upd["players/" + id + "/exitRound"] = null;
     upd["players/" + id + "/exitReason"] = null;
+    upd["players/" + id + "/retired"] = null;
+    upd["players/" + id + "/leaveReq"] = null;
   });
   await update(ref(db, "rooms/" + roomId), upd);
 }

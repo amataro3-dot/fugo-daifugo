@@ -19,6 +19,15 @@ const app = initializeApp(firebaseConfig);
 export const db = getDatabase(app);
 export const auth = getAuth(app);
 
+// サーバーの時刻(スマホごとの時計のずれをなくす。切断の3分を数えるのに使う)
+let serverOffset = 0;
+onValue(ref(db, ".info/serverTimeOffset"), (snap) => {
+  serverOffset = Number(snap.val()) || 0;
+});
+export function serverNow() {
+  return Date.now() + serverOffset;
+}
+
 export {
   ref, get, set, update, remove, onValue,
   onDisconnect, serverTimestamp, runTransaction, signInAnonymously

@@ -1,10 +1,11 @@
 import {
   db, auth, ref, get, set, update, remove, onValue,
-  onDisconnect, signInAnonymously
+  onDisconnect, signInAnonymously, serverTimestamp
 } from "./firebase.js";
 import {
   startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks,
-  checkClear, settle, checkResultAcks, sendResultAck, backToLobby, checkBid, checkSeat, checkMarket
+  checkClear, settle, checkResultAcks, sendResultAck, backToLobby, checkBid, checkSeat, checkMarket,
+  checkDisconnect
 } from "./host.js";
 import { renderGame } from "./ui.js";
 
@@ -111,9 +112,11 @@ function enterRoom(id) {
   roomId = id;
   localStorage.setItem("fugo_room", id);
 
-  const meRef = ref(db, "rooms/" + id + "/players/" + uid + "/online");
-  set(meRef, true);
-  onDisconnect(meRef).set(false);
+  // 接続中の印。切れたら自動で「切断」と「切れた時刻(サーバーの時刻)」が書かれる
+  const base = "rooms/" + id + "/players/" + uid;
+  update(ref(db, base), { online: true, offAt: null });
+  onDisconnect(ref(db, base + "/online")).set(false);
+  onDisconnect(ref(db, base + "/offAt")).set(serverTimestamp());
 
   if (unsub) unsub();
   unsub = onValue(ref(db, "rooms/" + id), (snap) => {
@@ -131,10 +134,11 @@ function enterRoom(id) {
 function ensureHost() {
   const players = roomData.players || {};
   const host = roomData.meta && roomData.meta.host;
-  const hostOk = host && players[host] && players[host].online !== false;
+  const hostOk = host && players[host] && players[host].online !== false && !players[host].leaveReq;
   if (hostOk) return;
+  // 次のホスト: 接続中の人(コンピューターと退出した人を除く)で、先に入室した人
   const alive = Object.entries(players)
-    .filter(([, p]) => p.online !== false)
+    .filter(([, p]) => !p.cpu && !p.leaveReq && p.online !== false)
     .sort((a, b) => a[1].joinedAt - b[1].joinedAt);
   if (alive.length && alive[0][0] === uid) {
     update(ref(db, "rooms/" + roomId + "/meta"), { host: uid });
@@ -214,9 +218,18 @@ function render() {
 }
 
 function onLeaveGame() {
-  if (!confirm("本当に退出しますか?")) return;
+  const me = (roomData && roomData.players && roomData.players[uid]) || {};
+  const playing = !me.spectator && !me.retired;
+  if (!confirm(playing ? "本当に退出しますか?\n(リタイヤになり、最下位になります)" : "本当に退出しますか?")) return;
   leaveRoom();
 }
+
+// 1秒ごとに、ホストが切断の見張り(3分でリタイヤ)をする
+setInterval(() => {
+  if (roomId && roomData && isHost() && roomData.meta && roomData.meta.started) {
+    checkDisconnect(roomId, () => roomData);
+  }
+}, 1000);
 
 ["set-coins", "set-rounds", "set-bidmax", "set-players"].forEach((id) => {
   $(id).onchange = () => {
@@ -248,12 +261,24 @@ $("btn-start").onclick = () => {
 
 async function leaveRoom() {
   const id = roomId;
-  const rest = Object.keys((roomData && roomData.players) || {}).filter((k) => k !== uid);
+  const room = roomData || {};
+  const players = room.players || {};
+  const base = "rooms/" + id + "/players/" + uid;
+  // まだ部屋に残っている人(コンピューターと、退出した人を除く)
+  const rest = Object.entries(players).filter(([k, p]) => k !== uid && !p.cpu && !p.leaveReq);
+  const inGame = !!(room.meta && room.meta.started && room.game && (room.game.order || []).includes(uid));
   if (unsub) unsub();
   unsub = null;
-  onDisconnect(ref(db, "rooms/" + id + "/players/" + uid + "/online")).cancel();
-  if (rest.length === 0) await remove(ref(db, "rooms/" + id));
-  else await remove(ref(db, "rooms/" + id + "/players/" + uid));
+  onDisconnect(ref(db, base + "/online")).cancel();
+  onDisconnect(ref(db, base + "/offAt")).cancel();
+  if (rest.length === 0) {
+    await remove(ref(db, "rooms/" + id));
+  } else if (inGame) {
+    // ゲームに参加していた人は、記録を残したまま退出(ホストがリタイヤ処理をする)
+    await update(ref(db, base), { leaveReq: true, online: false });
+  } else {
+    await remove(ref(db, base));
+  }
   leaveLocal();
 }
 

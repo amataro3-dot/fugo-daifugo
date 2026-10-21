@@ -2,6 +2,8 @@ import {
   label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge, suitCheck,
   lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJokerSingle
 } from "./rules.js";
+import { waitingIds } from "./host.js";
+import { serverNow } from "./firebase.js";
 
 let selected = [];
 let lastNoteId = null;
@@ -168,7 +170,18 @@ function seatEl(id, p, count, game, openHand, hand) {
     }
     if (t.textContent) d.appendChild(t);
   }
-  if (game.out && game.out[id]) {
+  if (p.retired) {
+    const rm = document.createElement("div");
+    rm.className = "passmark";
+    rm.textContent = "リタイヤ";
+    d.appendChild(rm);
+  } else if (p.online === false && !p.cpu) {
+    const om = document.createElement("div");
+    om.className = "passmark";
+    om.textContent = "切断中";
+    d.appendChild(om);
+  }
+  if (game.out && game.out[id] && !p.retired) {
     const fm = document.createElement("div");
     fm.className = "passmark";
     fm.textContent = "反則負け";
@@ -224,7 +237,8 @@ function renderFinal(root, g, onAction) {
     let txt = "🪙" + x.coins;
     if (x.debtTotal > 0) txt += "(借金-" + x.debtTotal + " → " + x.score + ")";
     if (x.exitRound) {
-      txt += "  退場(第" + x.exitRound + "ラウンド" + (x.exitReason === "debt" ? "・借金" : "") + ")";
+      txt += "  退場(第" + x.exitRound + "ラウンド" +
+        (x.exitReason === "debt" ? "・借金" : x.exitReason === "retire" ? "・リタイヤ" : "") + ")";
     }
     right.textContent = txt;
     row.appendChild(left);
@@ -844,9 +858,41 @@ function marketControls(root, g, me, uid, players, onAction) {
   }
 }
 
+// ===== 切断の待機表示 =====
+// 「〇〇さん接続が切れました。復帰中です。」を全員の画面に出す(残り時間つき)
+function updateWait() {
+  if (!lastArgs) return;
+  const room = lastArgs[1];
+  const uid = lastArgs[2];
+  const g = room.game || {};
+  const players = room.players || {};
+  const ids = g.phase === "final" ? [] : waitingIds(room).filter((id) => id !== uid);
+  let ov = document.querySelector(".waitov");
+  if (!ids.length) {
+    if (ov) ov.remove();
+    return;
+  }
+  if (!ov) {
+    ov = document.createElement("div");
+    ov.className = "overlay waitov";
+    ov.style.cssText = "flex-direction:column;gap:10px;font-size:20px;color:#fff;z-index:300;padding:20px";
+    document.body.appendChild(ov);
+  }
+  const lines = ids.map((id) => {
+    const p = players[id] || {};
+    const left = p.offAt ? Math.max(0, 180 - Math.floor((serverNow() - p.offAt) / 1000)) : 180;
+    const mm = Math.floor(left / 60);
+    const ss = String(left % 60).padStart(2, "0");
+    return p.name + " さん接続が切れました。\n復帰中です。(残り " + mm + ":" + ss + ")";
+  });
+  ov.textContent = lines.join("\n\n") + "\n\n3分たつとリタイヤになります";
+}
+setInterval(updateWait, 1000);
+
 export function renderGame(root, room, uid, onLeave, onAction) {
   lastArgs = [root, room, uid, onLeave, onAction];
   curSettings = room.settings || {};
+  updateWait();
   const g = room.game || {};
   const players = room.players || {};
   const hands = room.hands || {};
