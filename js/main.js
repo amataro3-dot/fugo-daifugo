@@ -5,7 +5,7 @@ import {
 import {
   startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks,
   checkClear, settle, checkResultAcks, sendResultAck, backToLobby, checkBid, checkSeat, checkMarket,
-  checkDisconnect
+  checkDisconnect, sendIntroAck, checkIntroAcks
 } from "./host.js";
 import { renderGame } from "./ui.js";
 
@@ -198,12 +198,14 @@ function render() {
     renderGame($("game-root"), roomData, uid, onLeaveGame, (act) => {
       if (act.type === "ack") return sendAck(roomId, uid);
       if (act.type === "rack") return sendResultAck(roomId, uid);
+      if (act.type === "iack") return sendIntroAck(roomId, uid);
       if (act.type === "lobby") return backToLobby(roomId, roomData);
       return sendAction(roomId, uid, act);
     });
     if (isHost()) {
       processActions(roomId, () => roomData);
       checkFoulAcks(roomId, () => roomData);
+      checkIntroAcks(roomId, () => roomData);
       checkClear(roomId, () => roomData);
       checkBid(roomId, () => roomData);
       checkSeat(roomId, () => roomData);

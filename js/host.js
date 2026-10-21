@@ -35,6 +35,39 @@ function note(text) {
   return { text, id: Date.now() };
 }
 
+// フェーズ最初の説明(全画面。全員がタップするまでゲームを止める)
+function intro(kind, title, text) {
+  return { id: Date.now(), kind, title, text, acks: {} };
+}
+function debtLine(room) {
+  return room.settings && room.settings.debt === "on"
+    ? "\nコインが足りないときは、神の手(借金)を借りて賭けられます(1ゲーム1回)。" : "";
+}
+
+export function sendIntroAck(roomId, uid) {
+  return set(ref(db, "rooms/" + roomId + "/game/intro/acks/" + uid), true);
+}
+
+// 説明を全員が読んだら(タップしたら)ゲームを進める。CPU・観戦者・切断中の人は待たない
+let introBusy = false;
+export async function checkIntroAcks(roomId, getRoom) {
+  if (introBusy) return;
+  const room = getRoom();
+  const g = room && room.game;
+  if (!g || !g.intro) return;
+  const acks = g.intro.acks || {};
+  const need = Object.entries(room.players || {})
+    .filter(([id, p]) => !p.cpu && !p.spectator && !p.retired && p.online !== false && (g.order || []).includes(id))
+    .map(([id]) => id);
+  if (!need.every((id) => acks[id])) return;
+  introBusy = true;
+  try {
+    await update(ref(db, "rooms/" + roomId + "/game"), { intro: null });
+  } finally {
+    introBusy = false;
+  }
+}
+
 // ===== 切断・リタイヤ =====
 
 const WAIT_MS = 3 * 60 * 1000; // 切断から3分でリタイヤ
@@ -84,7 +117,7 @@ function retirePlayer(room, id, upd, notes) {
     upd["game/phase"] = "result";
     upd["game/winner"] = alive[0] || null;
     upd["game/turn"] = null;
-    ["bid", "seat", "market", "change", "clear", "foul"].forEach((k) => {
+    ["bid", "seat", "market", "change", "clear", "foul", "intro"].forEach((k) => {
       upd["game/" + k] = null;
     });
     notes.push(alive[0] ? "残り1人になったため " + nameOf(players, alive[0]) + " さんの勝ち!" : "ノーゲーム");
@@ -272,7 +305,8 @@ export function sendAction(roomId, uid, act) {
     gek: !!act.gek,
     n: act.n || 0,
     c: typeof act.c === "number" ? act.c : -1,
-    borrow: !!act.borrow
+    borrow: !!act.borrow,
+    back: !!act.back
   });
 }
 
@@ -394,6 +428,8 @@ function goPlayS(setG, parent, text) {
   setG("parent", parent); // 次のラウンドの席決めで使う(前回の親)
   setG("bid", null);
   setG("notice", note(text));
+  setG("intro", intro("play", "対戦スタート!", text +
+    "\n\n親から時計回りに出します。最初に手札をなくした人の勝ち。\n2・8・ジョーカー(11バック中は3も)で上がると反則負け。"));
 }
 function goPlay(upd, parent, text) {
   goPlayS(pathSetter(upd), parent, text);
@@ -410,10 +446,16 @@ function startBid(setG, room, upd, order, lotNote, lead) {
     goPlayS(setG, p, head + "入札できる人がいないため\n" + nameOf(players, p) + " さんから");
     return;
   }
+  const max = (room.settings && room.settings.bidMax) || 5;
   setG("phase", "bid");
   setG("turn", null);
   setG("bid", { stage: "blind", need });
-  setG("notice", note(head + "親決めオークション!\n賭ける枚数を選んでください"));
+  setG("notice", note(head + "親決めオークション"));
+  setG("intro", intro("bid", "親決めオークション",
+    "1〜" + max + "枚を伏せて入札します。\n" +
+    "単独で一番多く賭けた人が親(最初にカードを出す人)。\n" +
+    "同じ枚数なら、その人たちで1枚ずつ競り上げ。\n" +
+    "出したコインはポットへ(戻りません)。" + debtLine(room)));
 }
 
 // ブラインドで、同点の全員が借金していたときの親
@@ -693,7 +735,8 @@ function applyAction(room, act) {
         upd["game/field"] = { cards, by: uid, count: 1, str: 3, suits: ["S"] };
         upd["game/clear"] = { id: Date.now(), turn: uid };
         upd["game/turn"] = null;
-        upd["game/notice"] = note("スペ3返し!");
+        upd["game/notice"] = note(nameOf(room.players || {}, uid) + " さん スペ3返し!");
+        upd["game/fx"] = note("スペ3返し!");
       }
       return upd;
     }
@@ -781,7 +824,9 @@ function applyAction(room, act) {
     const rest = removeCards(hand, cards);
     const eight = hasNum(cards, 8);
     const jack = hasNum(cards, 11);
-    const newRev = jack ? true : rev;
+    // 11バックは、出した人が「する」を選んだときだけ(すでに逆転中なら、そのまま)
+    const doBack = jack && !rev && !!act.back;
+    const newRev = doBack ? true : rev;
     const fieldObj = { cards, by: uid, count: cards.length, str: j.str, suits: sc.suits };
     if (cards.length >= 2 && cards.some(isJoker) && act.jsuits) fieldObj.jsuits = act.jsuits;
 
@@ -798,14 +843,18 @@ function applyAction(room, act) {
       upd["game/field"] = fieldObj;
       upd["game/clear"] = { id: Date.now(), turn: uid };
       upd["game/turn"] = null;
-      upd["game/notice"] = note("8切り!");
+      upd["game/notice"] = note(nameOf(room.players || {}, uid) + " さん 8切り!");
+      upd["game/fx"] = note("8切り!");
     } else {
       upd["game/field"] = fieldObj;
       upd["game/rev"] = newRev;
       upd["game/lock"] = newLock;
       upd["game/turn"] = nextPlayer(order, g.passed || {}, idx);
-      if (jack && !rev) msgs.push("11バック!");
-      if (msgs.length) upd["game/notice"] = note(msgs.join("\n"));
+      if (doBack) msgs.push("11バック!");
+      if (msgs.length) {
+        upd["game/notice"] = note(nameOf(room.players || {}, uid) + " さん " + msgs.join(" "));
+        upd["game/fx"] = note(msgs.join("\n"));
+      }
     }
     return upd;
   }
@@ -837,7 +886,7 @@ export async function processActions(roomId, getRoom) {
   try {
     for (let guard = 0; guard < 50; guard++) {
       const room = getRoom();
-      if (!room || !room.actions || paused(room)) break;
+      if (!room || !room.actions || paused(room) || (room.game && room.game.intro)) break;
       const key = Object.keys(room.actions).sort()[0];
       const act = room.actions[key];
       const upd = applyAction(room, act) || {};
@@ -854,7 +903,7 @@ export function maybeCpu(roomId, getRoom) {
   if (cpuTimer) return;
   const room = getRoom();
   const g = room && room.game;
-  if (!g || room.actions || g.foul || g.clear || paused(room)) return;
+  if (!g || room.actions || g.foul || g.clear || g.intro || paused(room)) return;
   if (g.phase === "bid") return maybeCpuBid(roomId, getRoom);
   if (g.phase === "seat") return maybeCpuSeat(roomId, getRoom);
   if (g.phase === "market") return maybeCpuMarket(roomId, getRoom);
@@ -1219,7 +1268,13 @@ async function nextRound(roomId, room) {
     } else {
       upd["game"] = {
         round: rr + 1, phase: "seat", pot: potNext, order: remaining, seat: s,
-        notice: note("席決めオークション!\n" + (s.first ? "前回の勝者が先に座ります\n" : "") + "入札するかパスを選んでください")
+        notice: note("ラウンド " + (rr + 1) + " 開始。席決めオークション"),
+        intro: intro("seat", "席決めオークション",
+          (s.first ? "前回の勝者(" + nameOf(players, s.first) + " さん)が先に座ります。\n" : "") +
+          "席を選ぶ順番を、1〜5枚の入札で決めます(パスもOK)。\n" +
+          "多く賭けた人から、好きな席を選べます。\n" +
+          "同じ枚数なら1枚ずつ競り合い。パスした人は余った席にランダム。\n" +
+          "入札したコインはポットへ。" + debtLine(room))
       };
     }
     await update(ref(db, "rooms/" + roomId), upd);
@@ -1269,7 +1324,12 @@ function dealAndMarket(upd, room, order, lead, round, pot, text, prevWinner) {
     goChangeG(G, room, upd, [head, "ベットできる人がいないため、マーケットはなし"].filter(Boolean).join("\n"));
   } else {
     G.market = { stage: "blind", lap: 1, cards, avail: [0, 1, 2], need };
-    G.notice = note([head, "カードマーケット!", leadLine, "カードを1枚選んでベット(1〜5枚)かパス"].filter(Boolean).join("\n"));
+    G.notice = note([head, "カードマーケット(" + leadLine.replace(/\n/g, " ") + ")"].filter(Boolean).join("\n"));
+    G.intro = intro("market", "カードマーケット", leadLine + "\n\n" +
+      "場の3枚から1枚を選んで、1〜5枚ベット(パスもOK)。\n" +
+      "一番多く賭けた人が、そのカードを手札1枚と交換できます。\n" +
+      "同じ枚数なら1枚ずつ競り合い。ベットは負けても戻りません。\n" +
+      "誰も賭けなかったカードは、親からもう1周。" + debtLine(room));
   }
   upd["game"] = clone(G);
 }
@@ -1291,7 +1351,13 @@ function goChangeG(G, room, upd, head) {
   if (first) {
     G.phase = "change";
     G.turn = first;
-    G.notice = note([head, "カードチェンジ(" + nameOf(room.players || {}, first) + " さんから)"].filter(Boolean).join("\n"));
+    const who = nameOf(room.players || {}, first);
+    G.notice = note([head, "カードチェンジ(" + who + " さんから)"].filter(Boolean).join("\n"));
+    G.intro = intro("change", "カードチェンジ",
+      who + " さんから順番に。\n" +
+      "手札を1枚選んで、山札の1枚と交換します。\n" +
+      "1回目1コイン、2回目2コイン、3回目4コイン(最大3回)。\n" +
+      "パスすると、あなたのチェンジは終了です。");
   } else {
     startBid(objSetter(G), room, upd, order, head, G.lead);
   }

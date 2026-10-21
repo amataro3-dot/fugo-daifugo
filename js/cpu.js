@@ -40,7 +40,15 @@ export function cpuChoose(hand, field, rev, lock) {
     gek = true;
     if (!lock && lockMode === "none") lockMode = "one";
   }
-  return { type: "play", cards: m.cards, jsuits: m.jsuits, lock: lockMode, lockSuit, gek };
+  // 11バック: 残りの手札に弱い数字が多ければ、バックする
+  let back = false;
+  if (!rev && m.cards.length < hand.length && m.cards.some((c) => !isJoker(c) && numOf(c) === 11)) {
+    const rest = hand.filter((c) => !m.cards.includes(c) && !isJoker(c));
+    const low = rest.filter((c) => strength(c) <= 8).length;
+    const high = rest.filter((c) => strength(c) >= 11).length;
+    back = low > high;
+  }
+  return { type: "play", cards: m.cards, jsuits: m.jsuits, lock: lockMode, lockSuit, gek, back };
 }
 
 // ===== 親決めオークション =====

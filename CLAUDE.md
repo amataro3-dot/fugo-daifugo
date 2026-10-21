@@ -26,7 +26,7 @@
   他の人は表示と操作の送信だけ。ホストが切れたら、接続中の人間で先に入室した人が引き継ぐ。
 - 操作の流れ: プレイヤーは `rooms/(ID)/actions` に操作を書く → ホストの `processActions` が検証して `game` などを更新 → 全員の画面が切り替わる。
 - ホストだけが走らせる処理は `main.js` の `render` と1秒ごとの `setInterval` から呼ぶ
-  (processActions, checkFoulAcks, checkClear, checkBid, checkSeat, checkMarket, maybeCpu, settle, checkResultAcks, checkDisconnect)。
+  (processActions, checkFoulAcks, checkIntroAcks, checkClear, checkBid, checkSeat, checkMarket, maybeCpu, settle, checkResultAcks, checkDisconnect)。
   新しい処理を足すときも同じ作りに合わせる。
 
 ### ファイル
@@ -70,7 +70,8 @@
 - 借金ルール「富豪の神の手」(席決め・マーケット・チェンジ・親決め、強制終了、返済、最終順位)
 - 精算・リザルト(コインの多い順)・次ラウンド・最終順位(「ロビーに戻る」で部屋全体がロビーへ)
 - 切断の待機(3分、ゲーム全体を止める)・リタイヤ・退出
-- アナウンスは画面上の帯(場のカードに重ねない)
+- フェーズ最初の説明は全画面(全員タップで開始)、途中のログは上の段と場の間の欄、しばり等は約1秒大きく表示
+- 11バックは、Jを出した人が「する / しない」を選ぶ
 
 まだ / 一部だけ:
 - ロビーで、人数より多いときにホストが観戦者を選ぶ画面(今は後から入った人が自動で観戦)

@@ -1,6 +1,6 @@
 import {
   label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge, suitCheck,
-  lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJokerSingle
+  lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJokerSingle, hasNum
 } from "./rules.js";
 import { waitingIds } from "./host.js";
 import { serverNow } from "./firebase.js";
@@ -10,7 +10,23 @@ let lastNoteId = null;
 let winShownId = null;
 let winDone = null;
 let lastArgs = null;
-let lastFieldKey = "";
+let lastFxId = null;
+let introClosed = null;
+
+// 途中のログ(上の段のプレイヤーと、場の間に出す。次のログが来るまで残す)
+function logEl(g, uid, spectator) {
+  const d = document.createElement("div");
+  d.style.cssText =
+    "grid-area:log;background:rgba(0,0,0,0.35);border-radius:10px;padding:6px 10px;" +
+    "font-size:14px;line-height:1.45;color:#fff;white-space:pre-line;text-align:center;min-height:1.45em";
+  let t = (g.notice && g.notice.text) || "";
+  if (g.intro && !spectator && g.intro.acks && g.intro.acks[uid]) {
+    t = (t ? t + "\n" : "") + "全員が説明を読むのを待っています…";
+  }
+  d.textContent = t;
+  return d;
+}
+const GRID_AREAS = '"top top top" "log log log" "left field right"';
 let bidPick = 1;
 let marketSel = null;
 let marketKey = "";
@@ -661,7 +677,9 @@ function renderSeatPhase(root, g, players, uid, spectator, onAction) {
     idx.forEach((i) => box.appendChild(seatSlotEl(i, s, players, g, myPick, onAction)));
     return box;
   };
+  grid.style.gridTemplateAreas = GRID_AREAS;
   grid.appendChild(mk("g-top", L.top));
+  grid.appendChild(logEl(g, uid, spectator));
   grid.appendChild(mk("g-left", L.left));
   const field = document.createElement("div");
   field.className = "g-field";
@@ -915,27 +933,49 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     winDone = null;
   }
 
-  // 新しいカードが場に出たら、前のポップアップをすぐ消す
-  const fieldKey = g.field ? g.field.by + ":" + g.field.cards.join(",") : "";
-  if (fieldKey && fieldKey !== lastFieldKey) {
-    document.querySelectorAll(".popup").forEach((e) => e.remove());
+  // しばり・8切り・11バックなどを、約1秒だけ大きく出す(タップ不要)
+  if (g.fx && g.fx.id !== lastFxId) {
+    lastFxId = g.fx.id;
+    if (Date.now() - g.fx.id < 5000) {
+      document.querySelectorAll(".fxov").forEach((e) => e.remove());
+      const fx = document.createElement("div");
+      fx.className = "fxov";
+      fx.textContent = g.fx.text;
+      fx.style.cssText =
+        "position:fixed;top:42%;left:50%;transform:translate(-50%,-50%);z-index:260;pointer-events:none;" +
+        "font-size:44px;font-weight:bold;color:#ffd84a;white-space:pre-line;text-align:center;line-height:1.2;" +
+        "background:rgba(0,0,0,0.6);padding:14px 26px;border-radius:16px;text-shadow:0 2px 6px #000";
+      document.body.appendChild(fx);
+      setTimeout(() => fx.remove(), 1100);
+    }
   }
-  lastFieldKey = fieldKey;
 
-  if (g.notice && g.notice.id !== lastNoteId) {
-    lastNoteId = g.notice.id;
-    document.querySelectorAll(".popup").forEach((e) => e.remove());
-    const pop = document.createElement("div");
-    pop.className = "popup";
-    pop.textContent = g.notice.text;
-    // 画面の上(ラウンド・ポットの帯のすぐ下)に細い帯で出す。場のカードには重ねない
-    pop.style.cssText =
-      "top:44px;left:50%;transform:translateX(-50%);width:calc(100% - 24px);max-width:456px;" +
-      "font-size:15px;line-height:1.35;padding:8px 12px;border-radius:10px;" +
-      "background:rgba(0,0,0,0.88);border:1px solid #f2c230";
-    document.body.appendChild(pop);
-    const lines = String(g.notice.text).split("\n").length;
-    setTimeout(() => pop.remove(), Math.min(4500, 1800 + lines * 450));
+  // フェーズ最初の説明(全画面)。タップで「読んだ」。全員が読んだらゲームが進む
+  document.querySelectorAll(".introov").forEach((e) => e.remove());
+  const it = g.intro;
+  const iDone = it && ((it.acks && it.acks[uid]) || (spectator && introClosed === it.id));
+  if (it && !iDone) {
+    const ov = document.createElement("div");
+    ov.className = "overlay introov";
+    ov.style.cssText = "flex-direction:column;gap:16px;padding:24px;z-index:250;background:rgba(0,0,0,0.9)";
+    const t = document.createElement("div");
+    t.textContent = it.title;
+    t.style.cssText = "font-size:30px;color:#f2c230;font-weight:bold";
+    const b = document.createElement("div");
+    b.textContent = it.text;
+    b.style.cssText = "font-size:17px;color:#fff;font-weight:normal;line-height:1.6;white-space:pre-line;max-width:440px";
+    const tap = document.createElement("div");
+    tap.textContent = spectator ? "(タップで閉じる)" : "タップして開始";
+    tap.style.cssText = "font-size:18px;color:#222;background:#f2c230;border-radius:10px;padding:10px 24px;margin-top:6px";
+    ov.appendChild(t);
+    ov.appendChild(b);
+    ov.appendChild(tap);
+    ov.onclick = () => {
+      ov.remove();
+      if (spectator) introClosed = it.id;
+      else onAction({ type: "iack" });
+    };
+    document.body.appendChild(ov);
   }
 
   if (g.foul && !(g.foul.acks && g.foul.acks[uid]) && !spectator) {
@@ -999,7 +1039,9 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     });
     return box;
   };
+  grid.style.gridTemplateAreas = GRID_AREAS;
   grid.appendChild(mk("g-top", top));
+  grid.appendChild(logEl(g, uid, spectator));
   grid.appendChild(mk("g-left", left));
 
   const field = document.createElement("div");
@@ -1320,8 +1362,16 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     } else if (!g.lock.gek && canGek(g.lock.mode)) {
       gek = (await askChoice("激しばりしますか?", yesNo)) === "yes";
     }
+    // 11バックするか(Jを出したとき。すでに逆転中・上がりのときは聞かない)
+    let back = false;
+    if (hasNum(cards, 11) && !g.rev && cards.length < myHand.length) {
+      back = (await askChoice("11バックしますか?", [
+        { label: "バックする", value: "yes" },
+        { label: "しない", value: "no" }
+      ])) === "yes";
+    }
     selected = [];
-    onAction({ type: "play", cards, jsuits: jokers.length ? jsuits : null, lock, lockSuit, gek });
+    onAction({ type: "play", cards, jsuits: jokers.length ? jsuits : null, lock, lockSuit, gek, back });
   };
   const passBtn = document.createElement("button");
   passBtn.className = "btn";
