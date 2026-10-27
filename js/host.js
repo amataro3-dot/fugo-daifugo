@@ -1,11 +1,11 @@
-import { db, ref, update, set, serverNow } from "./firebase.js";
+import { db, ref, update, set, serverNow } from "./firebase.js?v=1";
 import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
   canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
-} from "./rules.js";
+} from "./rules.js?v=1";
 import {
   cpuChoose, cpuChange, cpuBid, cpuRaise, cpuSeatBid, cpuBorrowRaise, cpuMarketBet, cpuMarketSwap
-} from "./cpu.js";
+} from "./cpu.js?v=1";
 
 function draw(state, n) {
   const out = [];
