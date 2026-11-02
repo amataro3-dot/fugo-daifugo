@@ -1,9 +1,9 @@
 import {
   label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge, suitCheck,
   lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJokerSingle, hasNum
-} from "./rules.js?v=4";
-import { waitingIds } from "./host.js?v=4";
-import { serverNow } from "./firebase.js?v=4";
+} from "./rules.js?v=5";
+import { waitingIds } from "./host.js?v=5";
+import { serverNow } from "./firebase.js?v=5";
 
 let selected = [];
 let lastNoteId = null;

@@ -1,13 +1,13 @@
 import {
   db, auth, ref, get, set, update, remove, onValue,
   onDisconnect, signInAnonymously, serverTimestamp
-} from "./firebase.js?v=4";
+} from "./firebase.js?v=5";
 import {
   startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks,
   checkClear, settle, checkResultAcks, sendResultAck, backToLobby, checkBid, checkSeat, checkMarket,
   checkDisconnect, sendIntroAck, checkIntroAcks, SECRET
-} from "./host.js?v=4";
-import { renderGame } from "./ui.js?v=4";
+} from "./host.js?v=5";
+import { renderGame } from "./ui.js?v=5";
 
 const $ = (id) => document.getElementById(id);
 const show = (name) => {
@@ -15,6 +15,13 @@ const show = (name) => {
   ["entry", "lobby", "game"].forEach((s) =>
     $("screen-" + s).classList.toggle("hidden", s !== name)
   );
+  // 戻るボタンの確認(js/backguard.js): 入り口は「ホームに戻りますか？」、ロビーは「ルームから出ますか？」、
+  // ゲーム中は「ゲームをやめますか？」(はいで部屋を出る。ゲームに参加していた人はリタイヤになる)
+  if (window.BackGuard) {
+    if (name === "lobby") BackGuard.set("room", () => leaveRoom());
+    else if (name === "game") BackGuard.set("game", () => leaveRoom());
+    else BackGuard.set("home");
+  }
 };
 
 let uid = null;
