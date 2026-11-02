@@ -1,11 +1,11 @@
-import { db, ref, update, set, serverNow } from "./firebase.js?v=3";
+import { db, ref, update, set, serverNow } from "./firebase.js?v=4";
 import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
   canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
-} from "./rules.js?v=3";
+} from "./rules.js?v=4";
 import {
   cpuChoose, cpuChange, cpuBid, cpuRaise, cpuSeatBid, cpuBorrowRaise, cpuMarketBet, cpuMarketSwap
-} from "./cpu.js?v=3";
+} from "./cpu.js?v=4";
 
 // 部屋への書き込み。手札・山札・ロット番号は、ほかの人に見えない「ひみつの場所」
 // (fugo-secret/ルームID)に分けて書き、みんなに見える場所には枚数だけ書く。

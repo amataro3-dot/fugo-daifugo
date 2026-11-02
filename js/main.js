@@ -1,13 +1,13 @@
 import {
   db, auth, ref, get, set, update, remove, onValue,
   onDisconnect, signInAnonymously, serverTimestamp
-} from "./firebase.js?v=3";
+} from "./firebase.js?v=4";
 import {
   startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks,
   checkClear, settle, checkResultAcks, sendResultAck, backToLobby, checkBid, checkSeat, checkMarket,
   checkDisconnect, sendIntroAck, checkIntroAcks, SECRET
-} from "./host.js?v=3";
-import { renderGame } from "./ui.js?v=3";
+} from "./host.js?v=4";
+import { renderGame } from "./ui.js?v=4";
 
 const $ = (id) => document.getElementById(id);
 const show = (name) => {
