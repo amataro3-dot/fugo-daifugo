@@ -1,11 +1,49 @@
-import { db, ref, update, set, serverNow } from "./firebase.js?v=1";
+import { db, ref, update, set, serverNow } from "./firebase.js?v=2";
 import {
   makeLot, shuffle, judge, hasNum, suitCheck, lockChoices,
   canSpe3, gekCan, gekFollow, isJoker, isFoulFinish
-} from "./rules.js?v=1";
+} from "./rules.js?v=2";
 import {
   cpuChoose, cpuChange, cpuBid, cpuRaise, cpuSeatBid, cpuBorrowRaise, cpuMarketBet, cpuMarketSwap
-} from "./cpu.js?v=1";
+} from "./cpu.js?v=2";
+
+// 部屋への書き込み。手札・山札・ロット番号は、ほかの人に見えない「ひみつの場所」
+// (fugo-secret/ルームID)に分けて書き、みんなに見える場所には枚数だけ書く。
+//   手札 hands/ID → fugo-secret/ID/hands/ID(枚数は rooms/ID/handN/ID)
+//   山札 deck・lot → fugo-secret/ID/deck・lot(残りの枚数は rooms/ID/deckN)
+export const SECRET = "fugo-secret/";
+export function splitWrite(roomId, upd) {
+  const out = {};
+  const room = "rooms/" + roomId + "/";
+  const secret = SECRET + roomId + "/";
+  const len = (v) => (Array.isArray(v) && v.length ? v.length : null);
+  Object.keys(upd).forEach((k) => {
+    const v = upd[k];
+    if (k === "hands") {
+      out[secret + "hands"] = v;
+      let n = null;
+      if (v) {
+        n = {};
+        Object.keys(v).forEach((id) => { if (len(v[id])) n[id] = len(v[id]); });
+      }
+      out[room + "handN"] = n;
+    } else if (k.startsWith("hands/")) {
+      out[secret + k] = v;
+      out[room + "handN/" + k.slice(6)] = len(v);
+    } else if (k === "deck") {
+      out[secret + "deck"] = v;
+      out[room + "deckN"] = len(v);
+    } else if (k === "lot") {
+      out[secret + "lot"] = v;
+    } else {
+      out[room + k] = v;
+    }
+  });
+  return out;
+}
+export function commit(roomId, upd) {
+  return update(ref(db), splitWrite(roomId, upd));
+}
 
 function draw(state, n) {
   const out = [];
@@ -202,7 +240,7 @@ export async function checkDisconnect(roomId, getRoom) {
   if (notes.length) upd["game/notice"] = note(notes.join("\n"));
   retiring = true;
   try {
-    await update(ref(db, "rooms/" + roomId), upd);
+    await commit(roomId, upd);
   } finally {
     retiring = false;
   }
@@ -290,7 +328,7 @@ export async function startGame(roomId, roomData) {
   dealAndMarket(updates, roomLike, seatOrder, lead, 1, 0, "", null);
   updates["meta/started"] = true;
 
-  await update(ref(db, "rooms/" + roomId), updates);
+  await commit(roomId, updates);
 }
 
 export function sendAction(roomId, uid, act) {
@@ -672,7 +710,7 @@ export function checkBid(roomId, getRoom) {
         }
       }
     }
-    await update(ref(db, "rooms/" + roomId), upd);
+    await commit(roomId, upd);
   }, 3000);
 }
 
@@ -891,7 +929,7 @@ export async function processActions(roomId, getRoom) {
       const act = room.actions[key];
       const upd = applyAction(room, act) || {};
       upd["actions/" + key] = null;
-      await update(ref(db, "rooms/" + roomId), upd);
+      await commit(roomId, upd);
     }
   } finally {
     busy = false;
@@ -1158,7 +1196,7 @@ export async function settle(roomId, getRoom) {
     if (outIds.length) result.outIds = outIds;
     upd["game/pot"] = winner ? 0 : pot;
     upd["game/result"] = result;
-    await update(ref(db, "rooms/" + roomId), upd);
+    await commit(roomId, upd);
   } finally {
     settling = false;
   }
@@ -1252,7 +1290,7 @@ async function nextRound(roomId, room) {
       return o;
     });
     upd["game"] = { round: rr, phase: "final", pot: potNext, order: g.order, ranking };
-    await update(ref(db, "rooms/" + roomId), upd);
+    await commit(roomId, upd);
     return;
   }
 
@@ -1277,7 +1315,7 @@ async function nextRound(roomId, room) {
           "入札したコインはポットへ。" + debtLine(room))
       };
     }
-    await update(ref(db, "rooms/" + roomId), upd);
+    await commit(roomId, upd);
     return;
   }
 
@@ -1288,7 +1326,7 @@ async function nextRound(roomId, room) {
   const w2 = g.result && g.result.winner && newOrder.includes(g.result.winner) ? g.result.winner : null;
   dealAndMarket(upd, room, newOrder, w2 || newOrder[Math.floor(Math.random() * newOrder.length)],
     rr + 1, potNext, "", w2);
-  await update(ref(db, "rooms/" + roomId), upd);
+  await commit(roomId, upd);
 }
 
 // 3枚ずつ配って、カードマーケットを始める
@@ -1670,7 +1708,7 @@ export function checkMarket(roomId, getRoom) {
     });
     if (!m.awards.length && !m.queue.length) notes.push("誰もベットしませんでした");
     marketNextRaise(G, m, r, upd, coins, notes);
-    await update(ref(db, "rooms/" + roomId), writeMarket(upd, G, m, notes));
+    await commit(roomId, writeMarket(upd, G, m, notes));
   }, 3000);
 }
 
@@ -1993,7 +2031,7 @@ export function checkSeat(roomId, getRoom) {
     } else {
       seatToPick(upd, r, s, gg.pot || 0, notes);
     }
-    await update(ref(db, "rooms/" + roomId), upd);
+    await commit(roomId, upd);
   }, 3000);
 }
 
@@ -2019,5 +2057,5 @@ export async function backToLobby(roomId, room) {
     upd["players/" + id + "/retired"] = null;
     upd["players/" + id + "/leaveReq"] = null;
   });
-  await update(ref(db, "rooms/" + roomId), upd);
+  await commit(roomId, upd);
 }

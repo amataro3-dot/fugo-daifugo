@@ -1,9 +1,9 @@
 import {
   label, SUIT_MARK, isJoker, suitOf, numOf, sortHand, judge, suitCheck,
   lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJokerSingle, hasNum
-} from "./rules.js?v=1";
-import { waitingIds } from "./host.js?v=1";
-import { serverNow } from "./firebase.js?v=1";
+} from "./rules.js?v=2";
+import { waitingIds } from "./host.js?v=2";
+import { serverNow } from "./firebase.js?v=2";
 
 let selected = [];
 let lastNoteId = null;
@@ -1003,7 +1003,7 @@ export function renderGame(root, room, uid, onLeave, onAction) {
 
   const bar = document.createElement("div");
   bar.className = "g-bar";
-  const deckN = room.deck ? room.deck.length : 0;
+  const deckN = room.deckN || 0; // 山札の中身は見えない。残りの枚数だけ
   bar.innerHTML =
     "<span>ラウンド <b>" + g.round + " / " + room.settings.rounds + "</b></span>" +
     "<span>ポット <b>" + (g.pot || 0) + "</b></span>" +
@@ -1034,8 +1034,10 @@ export function renderGame(root, room, uid, onLeave, onAction) {
     box.className = cls;
     ids.forEach((id) => {
       if (!players[id]) return;
+      // ほかの人の手札は見えない(観戦者だけ見える)。枚数は handN から
       const h = hands[id] || [];
-      box.appendChild(seatEl(id, players[id], h.length, g, spectator, h));
+      const n = (room.handN || {})[id] || h.length;
+      box.appendChild(seatEl(id, players[id], n, g, spectator, h));
     });
     return box;
   };

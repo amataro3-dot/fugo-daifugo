@@ -1,13 +1,13 @@
 import {
   db, auth, ref, get, set, update, remove, onValue,
   onDisconnect, signInAnonymously, serverTimestamp
-} from "./firebase.js?v=1";
+} from "./firebase.js?v=2";
 import {
   startGame, sendAction, processActions, maybeCpu, sendAck, checkFoulAcks,
   checkClear, settle, checkResultAcks, sendResultAck, backToLobby, checkBid, checkSeat, checkMarket,
-  checkDisconnect, sendIntroAck, checkIntroAcks
-} from "./host.js?v=1";
-import { renderGame } from "./ui.js?v=1";
+  checkDisconnect, sendIntroAck, checkIntroAcks, SECRET
+} from "./host.js?v=2";
+import { renderGame } from "./ui.js?v=2";
 
 const $ = (id) => document.getElementById(id);
 const show = (name) => {
@@ -19,8 +19,69 @@ const show = (name) => {
 
 let uid = null;
 let roomId = null;
-let roomData = null;
+let roomData = null; // 部屋のデータ + 見てよい手札・山札(下の compose で合体)
+let roomRaw = null;  // 部屋のデータ(みんなに見える場所)
 let unsub = null;
+
+// 手札・山札は「ひみつの場所」(fugo-secret/ルームID)にある。立場によって見てよい範囲がちがう:
+//   ホスト → 全部(配札・判定をするため)/ 観戦者 → 全員の手札 / プレイヤー → 自分の手札だけ
+let secretPath = null;
+let secretVal = null;
+let secretLoaded = false;
+let secretUnsub = null;
+
+function wantSecretPath() {
+  if (!roomRaw || !roomRaw.meta) return null;
+  const base = SECRET + roomId;
+  if (roomRaw.meta.host === uid) return base;
+  const me = (roomRaw.players || {})[uid] || {};
+  if (me.spectator) return base + "/hands";
+  return base + "/hands/" + uid;
+}
+
+function syncSecret() {
+  const want = wantSecretPath();
+  if (want === secretPath) return;
+  if (secretUnsub) secretUnsub();
+  secretUnsub = null;
+  secretPath = want;
+  secretVal = null;
+  secretLoaded = false;
+  if (!want) return;
+  const path = want;
+  secretUnsub = onValue(ref(db, path), (snap) => {
+    if (secretPath !== path) return;
+    secretVal = snap.val();
+    secretLoaded = true;
+    compose();
+    if (roomData) render();
+  }, () => {
+    // 読めなかった(立場が変わった直後など)。次に部屋が変わったときに、もう一度ためす
+    if (secretPath === path) secretPath = null;
+  });
+}
+
+function compose() {
+  if (!roomRaw) { roomData = null; return; }
+  const base = SECRET + roomId;
+  let hands = {}, deck = null, lot = null;
+  const v = secretLoaded ? secretVal : null;
+  if (secretPath === base) {
+    hands = (v && v.hands) || {};
+    deck = (v && v.deck) || null;
+    lot = (v && v.lot) || null;
+  } else if (secretPath === base + "/hands") {
+    hands = v || {};
+  } else if (v) {
+    hands = { [uid]: v };
+  }
+  roomData = Object.assign({}, roomRaw, { hands, deck, lot });
+}
+
+// ホストの仕事(配札・判定など)は、全員の手札を読みこんでからにする
+function hostReady() {
+  return isHost() && secretPath === SECRET + roomId && secretLoaded;
+}
 
 function fillSelect(id, from, to) {
   const el = $(id);
@@ -120,11 +181,13 @@ function enterRoom(id) {
 
   if (unsub) unsub();
   unsub = onValue(ref(db, "rooms/" + id), (snap) => {
-    roomData = snap.val();
-    if (!roomData || !roomData.players || !roomData.players[uid]) {
+    roomRaw = snap.val();
+    if (!roomRaw || !roomRaw.players || !roomRaw.players[uid]) {
       leaveLocal();
       return;
     }
+    syncSecret();
+    compose();
     ensureHost();
     render();
   });
@@ -199,10 +262,19 @@ function render() {
       if (act.type === "ack") return sendAck(roomId, uid);
       if (act.type === "rack") return sendResultAck(roomId, uid);
       if (act.type === "iack") return sendIntroAck(roomId, uid);
-      if (act.type === "lobby") return backToLobby(roomId, roomData);
+      if (act.type === "lobby") {
+        // 最終順位の「ロビーに戻る」: ホストならすぐ、ほかの人はホストにお願いを出す
+        if (isHost()) return backToLobby(roomId, roomData);
+        return set(ref(db, "rooms/" + roomId + "/game/lobbyReq/" + uid), true);
+      }
       return sendAction(roomId, uid, act);
     });
-    if (isHost()) {
+    if (hostReady()) {
+      const g = roomData.game || {};
+      if (g.phase === "final" && g.lobbyReq) {
+        backToLobby(roomId, roomData);
+        return;
+      }
       processActions(roomId, () => roomData);
       checkFoulAcks(roomId, () => roomData);
       checkIntroAcks(roomId, () => roomData);
@@ -228,7 +300,7 @@ function onLeaveGame() {
 
 // 1秒ごとに、ホストが切断の見張り(3分でリタイヤ)をする
 setInterval(() => {
-  if (roomId && roomData && isHost() && roomData.meta && roomData.meta.started) {
+  if (roomId && roomData && hostReady() && roomData.meta && roomData.meta.started) {
     checkDisconnect(roomId, () => roomData);
   }
 }, 1000);
@@ -271,10 +343,13 @@ async function leaveRoom() {
   const inGame = !!(room.meta && room.meta.started && room.game && (room.game.order || []).includes(uid));
   if (unsub) unsub();
   unsub = null;
+  if (secretUnsub) secretUnsub();
+  secretUnsub = null;
   onDisconnect(ref(db, base + "/online")).cancel();
   onDisconnect(ref(db, base + "/offAt")).cancel();
   if (rest.length === 0) {
-    await remove(ref(db, "rooms/" + id));
+    // 最後の1人: 部屋とひみつの場所を、いっしょに消す
+    await update(ref(db), { ["rooms/" + id]: null, [SECRET + id]: null });
   } else if (inGame) {
     // ゲームに参加していた人は、記録を残したまま退出(ホストがリタイヤ処理をする)
     await update(ref(db, base), { leaveReq: true, online: false });
@@ -292,8 +367,14 @@ $("btn-leave").onclick = () => {
 function leaveLocal() {
   if (unsub) unsub();
   unsub = null;
+  if (secretUnsub) secretUnsub();
+  secretUnsub = null;
+  secretPath = null;
+  secretVal = null;
+  secretLoaded = false;
   roomId = null;
   roomData = null;
+  roomRaw = null;
   localStorage.removeItem("fugo_room");
   show("entry");
 }

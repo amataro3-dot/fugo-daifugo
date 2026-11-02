@@ -1,6 +1,6 @@
 # 富豪大富豪 ルール仕様書(最新版)
 
-最終更新: 2026-10-21(説明画面・ログ欄・演出・11バックの選択を追加)
+最終更新: 2026-11-02(手札・山札を隠した、Firebase のルールを細かくした。v=2)
 「富豪大富豪 ルール仕様書(更新版・実装前、2026-10-16)」と「更新版2(2026-10-20)」を置き換える最新版。
 今の実装状況と進め方のルールは、リポジトリ直下の `CLAUDE.md` を参照。
 
@@ -19,7 +19,10 @@
 - ホストが切れたら、接続中の人間(コンピューターと退出した人を除く)で、先に入室した人がホストを引き継ぐ。そのため、ゲームの状態はすべて Firebase に置く。
 - データベース: Firebase Realtime Database(無料の Spark プラン)、プロジェクト fugo-daifugo。認証は匿名認証(名前を入力するだけ)。
 - 公開: GitHub Pages。技術は HTML + JavaScript のみ(ビルド不要)。
-- 手札は Firebase 上に全員分を置き、画面側で自分以外を伏せる(開発者ツールで見えても気にしない)。
+- 手札と山札は「ひみつの場所」(`fugo-secret/ルームID`)に置き、Firebase のルールで読める人を決める(2026-11-02〜):
+  自分の手札は本人だけ / 観戦者(リタイヤ・退場した人もふくむ)は全員の手札 / ホストは全部(配札・判定をするため)。
+  ほかの人には、手札と山札の**枚数だけ**を見せる(`handN`・`deckN`)。
+  ホストのスマホには全員の手札が届くので、くわしい人がホストなら、のぞこうと思えばのぞける(防ぐには有料のサーバーが必要。身内用なので許容)。
 - チャットなし。
 - コンピューターの手番は、ホストが約1.5秒待ってから出す(入札などの伏せる操作は約0.8秒)。
 - 将来、ホスト切断で止まるのが問題になったら、サーバー方式(Cloudflare Workers、Supabase など)を提案する約束。
@@ -271,8 +274,8 @@ rooms/(ルームID)/
   settings: { coins, rounds, bidMax, players, debt("on"|"off") }
   players/(各人): { name, ready, joinedAt, spectator, online, offAt, coins, debt, debtTotal, seat, cpu,
                     exitRound, exitReason("zero"|"debt"|"retire"), retired, leaveReq }
-  hands/(各人): [カード...]
-  deck: [カード...]  lot: 数字
+  handN/(各人): 手札の枚数(みんなに見える)
+  deckN: 山札の残り枚数(みんなに見える)
   actions/(キー): 操作の受付箱 { uid, type, cards, jsuits, lock, lockSuit, gek, back, n, c, borrow }
   game: {
     round, phase("seat"|"market"|"change"|"bid"|"play"|"result"|"final"), pot, order[], turn, rev,
@@ -281,10 +284,18 @@ rooms/(ルームID)/
     field{cards, by, count, str, suits, jsuits}, lock{mode, suits, gek, pair}, passed{}, last, out{},
     foul{id, name, cards, acks}, clear{id, turn}, notice{text, id}(ログ欄), fx{text, id}(大きい演出),
     intro{id, kind, title, text, acks}(フェーズ最初の説明),
-    winner, result{winner, gain, carry, repaid, last, outIds, acks}, ranking[]
+    winner, result{winner, gain, carry, repaid, last, outIds, acks}, ranking[],
+    lobbyReq{各人: true}(最終順位で「ロビーに戻る」を押した人。ホストが部屋全体をロビーへ戻す)
   }
+fugo-secret/(ルームID)/   … ひみつの場所(ルールで読める人を決める)
+  hands/(各人): [カード...]
+  deck: [カード...]  lot: 数字
 ```
-- 手札を別の場所に置くのは、将来サーバー方式にするとき手札だけ隠しやすくするため。
+- ホストは `hands`・`deck`・`lot` を書くとき、`host.js` の `commit()` を使う(ひみつの場所と枚数に自動で分けて書く)。
+- Firebase のルールは `muddys-notes` の `firebase/fugo-daifugo_rules.json`(GRAB & RUN! の `gr-rooms` もこのファイルに入っている)。
+  書けるのは: 部屋を作る人 / 設定・進行(`meta` `settings` `game` `handN` `deckN` など)はホストだけ /
+  自分の `players` は自分(コイン・借金・席・観戦者かどうか などは変えられない)/ 操作 `actions` は自分の名前でだけ /
+  「OK」タップ(`acks`)と `lobbyReq` は自分の分だけ / ホストの引き継ぎは、ホストが切断・退出しているときだけ。
 - 切断の検知: Firebase の onDisconnect で `online: false` と `offAt`(サーバー時刻)を自動で書く。
 - カード表記: "S3"=♠3 / "H12"=♥Q / "JK1","JK2"=ジョーカー(A=1)。
 
@@ -300,5 +311,5 @@ rooms/(ルームID)/
 
 - ♠2を出した後(次がジョーカー)の激しばりの扱い。
 - ペア・激しばりで、ジョーカーのマーク指定がかち合ったときの扱い。
-- Firebase のセキュリティルール(身内用だが、最低限の書き込み制限)。
+- APIキーの制限・App Check(トップに載せる前に)。
 - 全員が切断したまま戻らない部屋の後始末。
