@@ -4,6 +4,7 @@ import {
   onDisconnect, serverTimestamp, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
 import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app-check.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCCA_IKQNNVfYrXNsE24VbDgVySrAZiiDA",
@@ -16,6 +17,19 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
+
+// App Check: 「本物のゲームのページから来た」ことを、Google の reCAPTCHA で確かめる。
+// サイトキーは公開してよいもの(fugo-daifugo プロジェクトのキー。富豪大富豪と GRAB & RUN! で同じ)。
+// うまくいかなくても、ゲームは続ける(ただし Firebase で「適用」したあとは、データベースに入れない)。
+const APP_CHECK_SITE_KEY = "6Lf8UAwuAAAAAHy3r01-9YU5w5pDO7jdyYPJdzBI";
+try {
+  initializeAppCheck(app, {
+    provider: new ReCaptchaEnterpriseProvider(APP_CHECK_SITE_KEY),
+    isTokenAutoRefreshEnabled: true
+  });
+} catch (e) {
+  console.warn("App Check を始められませんでした", e);
+}
 export const db = getDatabase(app);
 export const auth = getAuth(app);
 

@@ -1,7 +1,7 @@
 import {
   findMoves, effStr, lockChoices, canSpe3, gekCan, isFoulFinish, isForbidden, isJoker, judge,
   numOf, strength
-} from "./rules.js?v=2";
+} from "./rules.js?v=3";
 
 export function cpuChoose(hand, field, rev, lock) {
   if (hand.includes("S3") && canSpe3(field, lock, ["S3"])) {
